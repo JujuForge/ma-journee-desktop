@@ -1,0 +1,66 @@
+{
+  "productName": "ma-journee",
+  "version": "0.18.0",
+  "identifier": "fr.jujuforge.majournee.desktop",
+  "build": {
+    "frontendDist": "https://majournee.com",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": {
+      "script": "sh -c 'npm run build && python3 -m http.server 1420 --directory dist'",
+      "cwd": "../../V067plusWeb",
+      "wait": false
+    }
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMxMzRFM0E3RjkzRDI1MkIKUldRckpUMzVwK00wTVdhMWJRbC9ZMitMdHpDY0ZxaFcxZjJKemgvQjI3M0EyajZrY3paTnE5NFcK",
+      "endpoints": [
+        "https://dl.majournee.com/latest-{{target}}-{{arch}}.json"
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "publisher": "Jujuforge",
+    "homepage": "https://majournee.com",
+    "license": "MIT",
+    "category": "Productivity",
+    "shortDescription": "Organisez taches, notes, revisions et emploi du temps au quotidien",
+    "longDescription": "Ma Journee est une application de productivite personnelle : gestion de taches et de notes, planification hebdomadaire, revisions espacees (SRS) et suivi de l'emploi du temps (iCal, Google Agenda). Gratuite, sans publicite, et concue pour fonctionner hors ligne.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0"
+        ],
+        "section": "utils",
+        "postInstallScript": "scripts/postinstall.sh",
+        "postRemoveScript": "scripts/postremove.sh",
+        "desktopTemplate": "scripts/ma-journee.desktop.hbs"
+      },
+      "rpm": {
+        "desktopTemplate": "scripts/ma-journee.desktop.hbs"
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine"
+      }
+    }
+  }
+}

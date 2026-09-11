@@ -1,0 +1,12 @@
+node_modules/
+.idea/
+src-tauri/target/
+src-tauri/gen/
+dist/
+*.key
+*.pfx
+.DS_Store
+.wrangler/
+release.sh
+release.ps1
+apt-repo/

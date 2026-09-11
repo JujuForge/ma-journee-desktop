@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capacites par defaut",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["https://majournee.com"]
+  },
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "updater:default",
+    "updater:allow-download-and-install",
+    "log:default"
+  ]
+}

@@ -83,6 +83,7 @@ fn set_update_notif_enabled(
     let mut settings = state.lock().unwrap();
     settings.update_notif_enabled = enabled;
     save_app_settings(&app, &settings);
+    log::info!("Notification de mise a jour {}", if enabled { "activee" } else { "desactivee" });
     Ok(())
 }
 
@@ -114,8 +115,9 @@ fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt;
     let autolaunch = app.autolaunch();
     let result = if enabled { autolaunch.enable() } else { autolaunch.disable() };
-    if let Err(e) = &result {
-        log::error!("Echec configuration autostart (enabled={}): {}", enabled, e);
+    match &result {
+        Ok(()) => log::info!("Autostart configure (enabled={})", enabled),
+        Err(e) => log::error!("Echec configuration autostart (enabled={}): {}", enabled, e),
     }
     result.map_err(|e| e.to_string())
 }
@@ -160,6 +162,8 @@ fn set_custom_notifications(
 ) -> Result<(), String> {
     *state.lock().unwrap() = notifications.clone();
     save_notifications(&app, &notifications);
+    // Compte uniquement : titre/message sont du contenu utilisateur, jamais journalises.
+    log::info!("Notifications personnalisees sauvegardees ({} entree(s))", notifications.len());
     Ok(())
 }
 
@@ -537,6 +541,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Deuxieme lancement : reafficher la fenetre existante au lieu de creer un
             // nouveau processus (qui dupliquerait l'icone tray).
+            log::info!("Deuxieme lancement detecte, fenetre existante reaffichee");
             show_and_focus_main_window(app);
         }))
         .plugin(
@@ -652,6 +657,7 @@ pub fn run() {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = win_hide.hide();
+                    log::info!("Fenetre fermee, application conservee en arriere-plan");
 
                     let mut settings = close_app_settings.lock().unwrap();
                     if !settings.tray_hint_shown {
@@ -684,7 +690,10 @@ pub fn run() {
                 .tooltip(if cfg!(debug_assertions) { "Ma Journee (DEV)" } else { "Ma Journee" })
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_and_focus_main_window(app),
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        log::info!("Fermeture demandee via le menu de la zone de notification");
+                        app.exit(0);
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {

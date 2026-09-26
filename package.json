@@ -7,6 +7,6 @@
     "dev": "tauri dev --config '{\"identifier\":\"fr.jujuforge.majournee.desktop.dev\"}'"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11"
+    "@tauri-apps/cli": "^2.11.5"
   }
 }

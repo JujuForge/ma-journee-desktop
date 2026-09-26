@@ -5,9 +5,9 @@ use std::{
     time::Duration,
 };
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
-    Manager,
+    Emitter, Manager,
 };
 use tauri_plugin_window_state::WindowExt;
 
@@ -458,7 +458,7 @@ fn open_log_folder(app: tauri::AppHandle) -> Result<(), String> {
         }
     }
     #[cfg(not(target_os = "windows"))]
-    { open_in_browser(&path_str); }
+    { let _ = open_in_browser(&path_str); }
     Ok(())
 }
 
@@ -531,8 +531,28 @@ fn start_update_check_loop(
     });
 }
 
+/// Sous GNOME (et derives : Ubuntu, Pop!_OS...), le module GTK `appmenu-gtk-module` est
+/// charge par defaut via `GTK_MODULES` et tente de deporter la barre de menu vers le HUD
+/// global de GNOME Shell, retire des versions recentes de GNOME. Resultat : le menu reste
+/// pleinement fonctionnel (evenements, accelerateurs clavier) mais ne s'affiche nulle part,
+/// y compris la barre classique sous le titre. On l'exclut explicitement pour forcer ce
+/// rendu classique, sans toucher aux autres modules GTK eventuellement charges (ex: ibus).
+#[cfg(target_os = "linux")]
+fn disable_gtk_global_appmenu() {
+    if let Ok(modules) = std::env::var("GTK_MODULES") {
+        let filtered: Vec<&str> = modules.split(':').filter(|m| !m.contains("appmenu")).collect();
+        // `set_var` est unsafe depuis l'edition 2024 (non thread-safe en general), mais sans
+        // risque ici : appele en tout premier dans `run()`, avant que quoi que ce soit
+        // (Tauri, GTK...) n'ait demarre le moindre thread susceptible de lire l'environnement.
+        unsafe { std::env::set_var("GTK_MODULES", filtered.join(":")); }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    disable_gtk_global_appmenu();
+
     let notifications: SharedNotifications = Arc::new(Mutex::new(Vec::new()));
     let pending_update: PendingUpdateVersion = Arc::new(Mutex::new(None));
     let app_settings: SharedAppSettings = Arc::new(Mutex::new(DesktopAppSettings::default()));
@@ -594,12 +614,59 @@ pub fn run() {
             } else {
                 ("majournee.com", "https://majournee.com")
             };
+
+            // Barre de menu native (Fichier / Affichage). Les accelerateurs utilisent tous
+            // au moins un modificateur (Ctrl/Cmd) : contrairement aux raccourcis lettre-seule
+            // de shortcuts.js (cote web), un accelerateur de menu natif est intercepte au
+            // niveau fenetre/OS quel que soit le focus DOM, y compris dans un champ de texte.
+            // Un accelerateur sans modificateur interromprait donc la frappe normale.
+            let menu = {
+                let new_task     = MenuItem::with_id(app, "newTask", "Nouvelle tâche", true, Some("CmdOrCtrl+N"))?;
+                let new_note     = MenuItem::with_id(app, "newNote", "Nouvelle note", true, Some("CmdOrCtrl+Shift+N"))?;
+                let new_deadline = MenuItem::with_id(app, "newDeadline", "Nouvelle échéance", true, Some("CmdOrCtrl+D"))?;
+                let quit         = MenuItem::with_id(app, "menu-quit", "Quitter", true, Some("CmdOrCtrl+Q"))?;
+                let file_menu = Submenu::with_items(app, "Fichier", true, &[
+                    &new_task, &new_note, &new_deadline,
+                    &PredefinedMenuItem::separator(app)?,
+                    &quit,
+                ])?;
+
+                let search      = MenuItem::with_id(app, "search", "Rechercher", true, Some("CmdOrCtrl+F"))?;
+                let today       = MenuItem::with_id(app, "today", "Aujourd'hui", true, Some("CmdOrCtrl+Home"))?;
+                let weekly      = MenuItem::with_id(app, "weekly", "Ma semaine", true, None::<&str>)?;
+                let weekly_prep = MenuItem::with_id(app, "weeklyPrep", "Préparation de la semaine", true, None::<&str>)?;
+                let refresh     = MenuItem::with_id(app, "refresh", "Actualiser", true, Some("CmdOrCtrl+R"))?;
+                let settings    = MenuItem::with_id(app, "settings", "Réglages", true, Some("CmdOrCtrl+,"))?;
+                let help        = MenuItem::with_id(app, "help", "Afficher les raccourcis", true, Some("F1"))?;
+                let view_menu = Submenu::with_items(app, "Affichage", true, &[
+                    &search, &today, &weekly, &weekly_prep, &refresh,
+                    &PredefinedMenuItem::separator(app)?,
+                    &settings, &help,
+                ])?;
+
+                Menu::with_items(app, &[&file_menu, &view_menu])?
+            };
+
+            // "menu-quit" est traite directement ici (symetrique au "quit" du tray, sans
+            // aller-retour JS) ; tout autre id est relaye au frontend qui reutilise les
+            // memes handlers que les raccourcis clavier web (buildShortcutHandlers()).
+            app.on_menu_event(|app, event| {
+                let id = event.id.as_ref();
+                if id == "menu-quit" {
+                    log::info!("Fermeture demandee via le menu Fichier");
+                    app.exit(0);
+                    return;
+                }
+                let _ = app.emit("native-menu", id.to_string());
+            });
+
             let win = tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
                 tauri::WebviewUrl::External(frontend_url.parse().unwrap()),
             )
             .title(if cfg!(debug_assertions) { "Ma Journée (DEV)" } else { "Ma Journée" })
+            .menu(menu)
             .inner_size(1100.0, 750.0)
             .min_inner_size(380.0, 500.0)
             // Cachee a la creation : evite un flash a la taille par defaut avant que

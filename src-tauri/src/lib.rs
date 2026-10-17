@@ -269,9 +269,9 @@ fn clear_webview_cache_if_updated(app: &tauri::AppHandle) {
         return;
     }
     if let Ok(data_dir) = app.path().app_data_dir() {
-        // WebKitGTK (Linux)
+        // WebKitGTK (Linux) : cache HTTP seulement. Ne pas vider CacheStorage (cache du
+        // Service Worker, qui gere deja ses versions) : sinon l'app ne demarre plus hors ligne.
         let _ = std::fs::remove_dir_all(data_dir.join("WebKitCache"));
-        let _ = std::fs::remove_dir_all(data_dir.join("CacheStorage"));
         // WebView2 (Windows)
         let _ = std::fs::remove_dir_all(data_dir.join("EBWebView"));
     }

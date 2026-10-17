@@ -272,8 +272,15 @@ fn clear_webview_cache_if_updated(app: &tauri::AppHandle) {
         // WebKitGTK (Linux) : cache HTTP seulement. Ne pas vider CacheStorage (cache du
         // Service Worker, qui gere deja ses versions) : sinon l'app ne demarre plus hors ligne.
         let _ = std::fs::remove_dir_all(data_dir.join("WebKitCache"));
-        // WebView2 (Windows)
-        let _ = std::fs::remove_dir_all(data_dir.join("EBWebView"));
+    }
+    // WebView2 (Windows) : profil dans app_local_data_dir (AppData\Local), pas dans
+    // app_data_dir (Roaming). Ne vider que le cache HTTP et le cache de code JS : le reste
+    // du profil contient le cache du Service Worker, localStorage et IndexedDB.
+    #[cfg(windows)]
+    if let Ok(local_dir) = app.path().app_local_data_dir() {
+        let profile = local_dir.join("EBWebView").join("Default");
+        let _ = std::fs::remove_dir_all(profile.join("Cache"));
+        let _ = std::fs::remove_dir_all(profile.join("Code Cache"));
     }
     let _ = std::fs::create_dir_all(&config_dir);
     let _ = std::fs::write(&marker, current);

@@ -133,6 +133,25 @@ fn is_allowed_url_scheme(url: &str) -> bool {
     url.starts_with("https://") || url.starts_with("http://") || url.starts_with("mailto:")
 }
 
+enum NavigationAction {
+    /// Page du site de l'app : navigation normale dans la fenetre.
+    Stay,
+    /// Autre site http(s) ou mailto : ouvert dans l'application par defaut du systeme.
+    OpenExternally,
+    /// Tout le reste (file:, javascript:, data:...) : bloque, jamais transmis a l'OS.
+    Block,
+}
+
+fn navigation_action(url: &tauri::Url, frontend_host: &str) -> NavigationAction {
+    if url.host_str() == Some(frontend_host) {
+        NavigationAction::Stay
+    } else if is_allowed_url_scheme(url.as_str()) {
+        NavigationAction::OpenExternally
+    } else {
+        NavigationAction::Block
+    }
+}
+
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
     if is_allowed_url_scheme(&url) {
@@ -227,9 +246,11 @@ fn report_previous_crash_if_any(app: &tauri::AppHandle) {
 /// instantanement sans laisser de trace visible. Le hook s'execute quand meme juste
 /// avant l'abort (sur le thread qui panique). Ecriture disque directe plutot que via
 /// `log`/tauri-plugin-log : ce dernier peut bufferiser, ce qui ne garantirait pas que
-/// le message atteigne le disque avant la mort du processus.
+/// le message atteigne le disque avant la mort du processus. Le hook precedent (affichage sur
+/// stderr) est rappele ensuite, pour que les panics restent visibles en developpement.
 fn install_panic_hook(app: &tauri::AppHandle) {
     let path = crash_log_path(app);
+    let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let location = info
             .location()
@@ -252,6 +273,7 @@ fn install_panic_hook(app: &tauri::AppHandle) {
             backtrace
         );
         let _ = std::fs::write(&path, content);
+        previous_hook(info);
     }));
 }
 
@@ -333,7 +355,7 @@ fn load_notifications_from(dir: &Path) -> Vec<CustomNotification> {
     let migrated = vec![CustomNotification {
         id: "migrated-weekly-notif".to_string(),
         label: "Bilan de la semaine".to_string(),
-        message: "C\'est le moment de faire votre bilan hebdomadaire dans Ma Journee.".to_string(),
+        message: "C'est le moment de faire votre bilan hebdomadaire dans Ma Journée.".to_string(),
         time: format!("{:02}:{:02}", cfg.hour, cfg.minute),
         days: vec![iso_day],
         enabled: cfg.enabled,
@@ -353,15 +375,15 @@ fn should_fire_now(notif: &CustomNotification, today: &str, day: u32, hour: u32,
     if !notif.enabled || !notif.days.contains(&day) {
         return false;
     }
-    if let Some(start) = &notif.start_date {
-        if today < start.as_str() {
-            return false;
-        }
+    if let Some(start) = &notif.start_date
+        && today < start.as_str()
+    {
+        return false;
     }
-    if let Some(end) = &notif.end_date {
-        if today > end.as_str() {
-            return false;
-        }
+    if let Some(end) = &notif.end_date
+        && today > end.as_str()
+    {
+        return false;
     }
     notif.time == format!("{:02}:{:02}", hour, minute)
 }
@@ -541,16 +563,9 @@ fn notify(app: tauri::AppHandle, title: String, body: String) {
 #[tauri::command]
 fn open_log_folder(app: tauri::AppHandle) -> Result<(), String> {
     let dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
-    let path_str = dir.to_string_lossy().to_string();
-    #[cfg(target_os = "windows")]
-    {
-        if let Err(e) = std::process::Command::new("explorer").arg(&path_str).spawn() {
-            log::warn!("Echec ouverture du dossier de logs (explorer): {}", e);
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    { let _ = open_in_browser(&path_str); }
-    Ok(())
+    // `opener` signale un chemin inexistant sous Linux : on s'assure donc que le dossier existe.
+    let _ = std::fs::create_dir_all(&dir);
+    open_in_browser(&dir.to_string_lossy())
 }
 
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 3600);
@@ -577,8 +592,8 @@ async fn check_for_update(
             {
                 send_notification(
                     app,
-                    "Mise a jour disponible",
-                    &format!("Version {} disponible. Ouvrez Ma Journee pour l\'installer.", version),
+                    "Mise à jour disponible",
+                    &format!("Version {} disponible. Ouvrez Ma Journée pour l'installer.", version),
                 );
             }
             Ok(Some(version))
@@ -773,13 +788,17 @@ pub fn run() {
                     if(a.target==='_blank'||a.protocol==='mailto:'){e.preventDefault();openExt(a.href);}
                 },true);
             })();"#)
-            .on_navigation(move |url| {
-                if url.host_str() == Some(frontend_host) {
-                    return true;
+            .on_navigation(move |url| match navigation_action(url, frontend_host) {
+                NavigationAction::Stay => true,
+                NavigationAction::OpenExternally => {
+                    let url_str = url.to_string();
+                    std::thread::spawn(move || { let _ = open_in_browser(&url_str); });
+                    false
                 }
-                let url_str = url.to_string();
-                std::thread::spawn(move || { let _ = open_in_browser(&url_str); });
-                false
+                NavigationAction::Block => {
+                    log::warn!("Navigation refusee : schema non autorise");
+                    false
+                }
             })
             .build()?;
 
@@ -834,10 +853,10 @@ pub fn run() {
             // Item de statut non cliquable, mis a jour en direct depuis le web via
             // la commande `update_tray_status` (nombre de taches restantes, mails non lus...)
             let status_item =
-                MenuItem::with_id(app, "status", "Ma Journee", false, None::<&str>)?;
+                MenuItem::with_id(app, "status", "Ma Journée", false, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
             let show_item =
-                MenuItem::with_id(app, "show", "Ouvrir Ma Journee", true, None::<&str>)?;
+                MenuItem::with_id(app, "show", "Ouvrir Ma Journée", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quitter", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&status_item, &separator, &show_item, &quit_item])?;
             app.manage(TrayStatusItem(status_item.clone()));
@@ -845,7 +864,7 @@ pub fn run() {
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().cloned().ok_or("Icone par defaut introuvable pour le tray")?)
                 .menu(&menu)
-                .tooltip(if cfg!(debug_assertions) { "Ma Journee (DEV)" } else { "Ma Journee" })
+                .tooltip(if cfg!(debug_assertions) { "Ma Journée (DEV)" } else { "Ma Journée" })
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_and_focus_main_window(app),
                     "quit" => {
@@ -924,6 +943,33 @@ mod tests {
         assert!(!is_allowed_url_scheme("javascript:alert(1)"));
         assert!(!is_allowed_url_scheme(r"\\host\evil.exe"));
         assert!(!is_allowed_url_scheme(""));
+    }
+
+    // ── navigation_action() ───────────────────────────────────────────────────
+
+    fn action_for(url: &str) -> NavigationAction {
+        navigation_action(&url.parse().unwrap(), "majournee.com")
+    }
+
+    #[test]
+    fn stays_in_the_window_on_the_app_host() {
+        assert!(matches!(action_for("https://majournee.com/taches?x=1"), NavigationAction::Stay));
+    }
+
+    #[test]
+    fn opens_other_http_sites_and_mailto_externally() {
+        assert!(matches!(action_for("https://example.com/"), NavigationAction::OpenExternally));
+        assert!(matches!(action_for("http://example.com/"), NavigationAction::OpenExternally));
+        assert!(matches!(action_for("mailto:a@example.com"), NavigationAction::OpenExternally));
+        // Sous-domaine ou domaine voisin : ce n'est pas l'hote de l'app.
+        assert!(matches!(action_for("https://evil-majournee.com/"), NavigationAction::OpenExternally));
+    }
+
+    #[test]
+    fn blocks_other_schemes_instead_of_handing_them_to_the_os() {
+        for url in ["file:///etc/passwd", "ftp://example.com/x", "data:text/html,hi", "javascript:alert(1)"] {
+            assert!(matches!(action_for(url), NavigationAction::Block), "{url}");
+        }
     }
 
     // ── has_version_changed() ────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 [package]
 name = "ma-journee-desktop"
-version = "0.20.0"
+version = "0.21.0"
 edition = "2024"
 
 [lib]
@@ -22,7 +22,7 @@ log = "0.4"
 notify-rust = "4"
 # Ouverture d'URL/fichiers externes via l'API native de chaque OS (ShellExecuteW sous Windows,
 # xdg-open sous Linux) : evite tout passage par `cmd /C start` et son re-parsing des metacaracteres.
-opener = "0.7"
+opener = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 time = { version = "0.3.49", features = ["local-offset"] }

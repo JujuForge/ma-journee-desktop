@@ -1,6 +1,6 @@
 {
   "productName": "ma-journee",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "identifier": "fr.jujuforge.majournee.desktop",
   "build": {
     "frontendDist": "https://majournee.com",

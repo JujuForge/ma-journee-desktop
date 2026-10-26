@@ -1,12 +1,12 @@
 {
   "name": "ma-journee-desktop",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "private": true,
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev --config '{\"identifier\":\"fr.jujuforge.majournee.desktop.dev\"}'"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.5"
+    "@tauri-apps/cli": "^2.12.4"
   }
 }

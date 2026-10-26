@@ -1,5 +1,6 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
     time::Duration,
@@ -10,6 +11,9 @@ use tauri::{
     Emitter, Manager,
 };
 use tauri_plugin_window_state::WindowExt;
+
+mod storage;
+use storage::LoadResult;
 
 /// Notification programmee par l'utilisateur (titre, message, heure, jours de la
 /// semaine, periode de validite optionnelle). Equivalent bureau de
@@ -154,47 +158,48 @@ fn get_custom_notifications(state: tauri::State<'_, SharedNotifications>) -> Vec
     state.lock().unwrap().clone()
 }
 
+/// Valide puis sauvegarde la liste envoyee par le frontend. Rien n'est modifie (ni memoire, ni
+/// disque) si la liste est invalide ou si l'ecriture echoue : l'erreur remonte au frontend.
 #[tauri::command]
 fn set_custom_notifications(
     state: tauri::State<'_, SharedNotifications>,
     app: tauri::AppHandle,
     notifications: Vec<CustomNotification>,
 ) -> Result<(), String> {
-    *state.lock().unwrap() = notifications.clone();
-    save_notifications(&app, &notifications);
+    validate_notifications(&notifications).inspect_err(|e| {
+        log::warn!("Notifications personnalisees refusees : {}", e);
+    })?;
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    save_notifications_in(&dir, &notifications).inspect_err(|e| {
+        log::error!("Echec sauvegarde des notifications personnalisees : {}", e);
+    })?;
     // Compte uniquement : titre/message sont du contenu utilisateur, jamais journalises.
     log::info!("Notifications personnalisees sauvegardees ({} entree(s))", notifications.len());
+    *state.lock().unwrap() = notifications;
     Ok(())
 }
 
-fn legacy_config_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
-    app.path().app_config_dir().ok().map(|d| d.join("weekly_notif.json"))
-}
+const NOTIFICATIONS_FILE: &str = "custom_notifications.json";
+const LEGACY_NOTIFICATIONS_FILE: &str = "weekly_notif.json";
+const APP_SETTINGS_FILE: &str = "app_settings.json";
 
-fn notifications_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
-    app.path().app_config_dir().ok().map(|d| d.join("custom_notifications.json"))
-}
-
-fn app_settings_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
-    app.path().app_config_dir().ok().map(|d| d.join("app_settings.json"))
+fn config_file(app: &tauri::AppHandle, name: &str) -> Option<PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join(name))
 }
 
 fn save_app_settings(app: &tauri::AppHandle, settings: &DesktopAppSettings) {
-    if let Some(path) = app_settings_path(app) {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Err(e) = std::fs::write(&path, serde_json::to_string(settings).unwrap_or_default()) {
-            log::warn!("Echec sauvegarde des reglages de l'app ({}): {}", path.display(), e);
-        }
+    if let Some(path) = config_file(app, APP_SETTINGS_FILE)
+        && let Err(e) = storage::save_json(&path, settings)
+    {
+        log::warn!("Echec sauvegarde des reglages de l'app : {}", e);
     }
 }
 
 fn load_app_settings(app: &tauri::AppHandle) -> DesktopAppSettings {
-    app_settings_path(app)
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    match config_file(app, APP_SETTINGS_FILE).map(|p| storage::load_json(&p)) {
+        Some(LoadResult::Loaded(settings)) => settings,
+        _ => DesktopAppSettings::default(),
+    }
 }
 
 fn crash_log_path(app: &tauri::AppHandle) -> std::path::PathBuf {
@@ -286,15 +291,8 @@ fn clear_webview_cache_if_updated(app: &tauri::AppHandle) {
     let _ = std::fs::write(&marker, current);
 }
 
-fn save_notifications(app: &tauri::AppHandle, notifications: &[CustomNotification]) {
-    if let Some(path) = notifications_path(app) {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Err(e) = std::fs::write(&path, serde_json::to_string(notifications).unwrap_or_default()) {
-            log::warn!("Echec sauvegarde des notifications personnalisees ({}): {}", path.display(), e);
-        }
-    }
+fn save_notifications_in(dir: &Path, notifications: &[CustomNotification]) -> Result<(), String> {
+    storage::save_json(&dir.join(NOTIFICATIONS_FILE), notifications)
 }
 
 /// Convertit un jour de la convention JS (0=dimanche..6=samedi, utilisee par l'ancien
@@ -304,42 +302,48 @@ fn migrate_legacy_day(js_day: u32) -> u32 {
     if js_day == 0 { 7 } else { js_day }
 }
 
-/// Charge les notifications personnalisees. Si aucun fichier n'existe mais que
+fn load_notifications(app: &tauri::AppHandle) -> Vec<CustomNotification> {
+    match app.path().app_config_dir() {
+        Ok(dir) => load_notifications_from(&dir),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Charge les notifications personnalisees depuis `dir`. Si aucun fichier n'existe mais que
 /// l'ancien reglage "Bilan de la semaine" (mono-creneau) est present, le convertit
 /// en une entree unique de la nouvelle liste puis la persiste, afin de ne perdre
 /// aucune configuration existante de l'utilisateur lors de la mise a jour.
-fn load_notifications(app: &tauri::AppHandle) -> Vec<CustomNotification> {
-    if let Some(path) = notifications_path(app) {
-        if let Some(loaded) = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Vec<CustomNotification>>(&s).ok())
-        {
-            return loaded;
-        }
+/// Un fichier existant mais illisible n'est pas migre : l'ancien reglage pourrait ressusciter
+/// une notification que l'utilisateur avait supprimee depuis. Le fichier illisible est conserve
+/// en `.corrupt` (voir `storage::load_json`).
+fn load_notifications_from(dir: &Path) -> Vec<CustomNotification> {
+    match storage::load_json::<Vec<CustomNotification>>(&dir.join(NOTIFICATIONS_FILE)) {
+        LoadResult::Loaded(loaded) => return loaded,
+        LoadResult::Corrupt => return Vec::new(),
+        LoadResult::Missing => {}
     }
 
-    let legacy = legacy_config_path(app)
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str::<LegacyWeeklyNotifConfig>(&s).ok());
+    let LoadResult::Loaded(cfg) =
+        storage::load_json::<LegacyWeeklyNotifConfig>(&dir.join(LEGACY_NOTIFICATIONS_FILE))
+    else {
+        return Vec::new();
+    };
 
-    match legacy {
-        Some(cfg) => {
-            let iso_day = migrate_legacy_day(cfg.day_of_week);
-            let migrated = vec![CustomNotification {
-                id: "migrated-weekly-notif".to_string(),
-                label: "Bilan de la semaine".to_string(),
-                message: "C\'est le moment de faire votre bilan hebdomadaire dans Ma Journee.".to_string(),
-                time: format!("{:02}:{:02}", cfg.hour, cfg.minute),
-                days: vec![iso_day],
-                enabled: cfg.enabled,
-                start_date: None,
-                end_date: None,
-            }];
-            save_notifications(app, &migrated);
-            migrated
-        }
-        None => Vec::new(),
+    let iso_day = migrate_legacy_day(cfg.day_of_week);
+    let migrated = vec![CustomNotification {
+        id: "migrated-weekly-notif".to_string(),
+        label: "Bilan de la semaine".to_string(),
+        message: "C\'est le moment de faire votre bilan hebdomadaire dans Ma Journee.".to_string(),
+        time: format!("{:02}:{:02}", cfg.hour, cfg.minute),
+        days: vec![iso_day],
+        enabled: cfg.enabled,
+        start_date: None,
+        end_date: None,
+    }];
+    if let Err(e) = save_notifications_in(dir, &migrated) {
+        log::warn!("Echec sauvegarde de la notification migree : {}", e);
     }
+    migrated
 }
 
 /// Determine si `notif` doit se declencher a l'instant precis decrit par
@@ -360,6 +364,86 @@ fn should_fire_now(notif: &CustomNotification, today: &str, day: u32, hour: u32,
         }
     }
     notif.time == format!("{:02}:{:02}", hour, minute)
+}
+
+const MAX_LABEL_CHARS: usize = 200;
+const MAX_MESSAGE_CHARS: usize = 2000;
+
+/// `HH:MM` strict (deux chiffres partout) : `should_fire_now` compare des chaines, donc "8:00"
+/// ne correspondrait jamais a "08:00".
+fn is_valid_time(s: &str) -> bool {
+    let Some((h, m)) = s.split_once(':') else { return false };
+    let two_digits = |p: &str| p.len() == 2 && p.bytes().all(|b| b.is_ascii_digit());
+    two_digits(h)
+        && two_digits(m)
+        && h.parse::<u32>().is_ok_and(|h| h < 24)
+        && m.parse::<u32>().is_ok_and(|m| m < 60)
+}
+
+/// `YYYY-MM-DD` strict, date calendaire reelle (jours du mois et annees bissextiles). Le format
+/// fixe est ce qui rend valide la comparaison lexicographique de `should_fire_now`.
+fn is_valid_date(s: &str) -> bool {
+    let mut parts = s.split('-');
+    let (Some(y), Some(m), Some(d), None) = (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let digits = |p: &str, n: usize| p.len() == n && p.bytes().all(|b| b.is_ascii_digit());
+    if !(digits(y, 4) && digits(m, 2) && digits(d, 2)) {
+        return false;
+    }
+    let (Ok(y), Ok(m), Ok(d)) = (y.parse::<i32>(), m.parse::<u8>(), d.parse::<u8>()) else {
+        return false;
+    };
+    time::Month::try_from(m)
+        .ok()
+        .and_then(|month| time::Date::from_calendar_date(y, month, d).ok())
+        .is_some()
+}
+
+/// Verifie la liste recue du frontend (distant) avant de la persister. Le message d'erreur
+/// designe l'entree (rang a partir de 1) et le champ, sans jamais recopier le contenu utilisateur.
+fn validate_notifications(list: &[CustomNotification]) -> Result<(), String> {
+    let mut ids = HashSet::new();
+    for (i, n) in list.iter().enumerate() {
+        let err = |field: &str, problem: &str| Err(format!("notification {} : {} {}", i + 1, field, problem));
+
+        if n.id.is_empty() {
+            return err("id", "vide");
+        }
+        if !ids.insert(n.id.as_str()) {
+            return err("id", "en double");
+        }
+        if n.label.chars().count() > MAX_LABEL_CHARS {
+            return err("label", "trop long");
+        }
+        if n.message.chars().count() > MAX_MESSAGE_CHARS {
+            return err("message", "trop long");
+        }
+        if !is_valid_time(&n.time) {
+            return err("time", "doit etre au format HH:MM");
+        }
+        let mut seen_days = [false; 8];
+        for &day in &n.days {
+            if !(1..=7).contains(&day) {
+                return err("days", "doit contenir des jours de 1 (lundi) a 7 (dimanche)");
+            }
+            if std::mem::replace(&mut seen_days[day as usize], true) {
+                return err("days", "contient un jour en double");
+            }
+        }
+        for (field, date) in [("start_date", &n.start_date), ("end_date", &n.end_date)] {
+            if date.as_deref().is_some_and(|d| !is_valid_date(d)) {
+                return err(field, "doit etre une date au format YYYY-MM-DD");
+            }
+        }
+        if let (Some(start), Some(end)) = (&n.start_date, &n.end_date)
+            && start > end
+        {
+            return err("start_date", "posterieure a end_date");
+        }
+    }
+    Ok(())
 }
 
 fn start_notification_loop(notifications: SharedNotifications, app: tauri::AppHandle) {
@@ -937,5 +1021,178 @@ mod tests {
         n.start_date = Some("2026-08-24".to_string());
         n.end_date = Some("2026-08-24".to_string());
         assert!(should_fire_now(&n, "2026-08-24", 1, 8, 0));
+    }
+
+    // ── JSON persiste (contrat avec le frontend et les versions precedentes) ───
+
+    #[test]
+    fn notification_json_uses_snake_case_keys() {
+        let mut n = base_notif();
+        n.start_date = Some("2026-09-01".to_string());
+        let json = serde_json::to_value(&n).unwrap();
+        assert_eq!(json["start_date"], "2026-09-01");
+        assert!(json["end_date"].is_null());
+        assert_eq!(json["days"], serde_json::json!([1, 2, 3, 4, 5]));
+    }
+
+    #[test]
+    fn notification_json_without_date_keys_loads_as_none() {
+        let n: CustomNotification = serde_json::from_str(
+            r#"{"id":"x","label":"L","message":"M","time":"08:00","days":[1],"enabled":true}"#,
+        )
+        .unwrap();
+        assert_eq!(n.start_date, None);
+        assert_eq!(n.end_date, None);
+    }
+
+    #[test]
+    fn app_settings_without_tray_hint_loads_with_default() {
+        let s: DesktopAppSettings = serde_json::from_str(r#"{"update_notif_enabled":false}"#).unwrap();
+        assert!(!s.update_notif_enabled);
+        assert!(!s.tray_hint_shown);
+    }
+
+    // ── load_notifications_from() / save_notifications_in() ───────────────────
+
+    #[test]
+    fn notifications_survive_a_save_and_reload() {
+        let tmp = storage::TempDir::new("notif-roundtrip");
+        let mut n = base_notif();
+        n.end_date = Some("2026-12-31".to_string());
+        save_notifications_in(&tmp.0, std::slice::from_ref(&n)).unwrap();
+        let loaded = load_notifications_from(&tmp.0);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "test");
+        assert_eq!(loaded[0].end_date.as_deref(), Some("2026-12-31"));
+    }
+
+    #[test]
+    fn no_files_gives_an_empty_list() {
+        let tmp = storage::TempDir::new("notif-empty");
+        assert!(load_notifications_from(&tmp.0).is_empty());
+    }
+
+    #[test]
+    fn legacy_weekly_setting_is_migrated_and_persisted() {
+        let tmp = storage::TempDir::new("notif-legacy");
+        std::fs::write(
+            tmp.0.join(LEGACY_NOTIFICATIONS_FILE),
+            r#"{"enabled":true,"day_of_week":0,"hour":7,"minute":5}"#,
+        )
+        .unwrap();
+        let migrated = load_notifications_from(&tmp.0);
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(migrated[0].days, vec![7]); // dimanche JS (0) -> ISO (7)
+        assert_eq!(migrated[0].time, "07:05");
+        assert!(migrated[0].enabled);
+        // Persiste : un second chargement lit le nouveau fichier.
+        assert!(tmp.0.join(NOTIFICATIONS_FILE).exists());
+        assert_eq!(load_notifications_from(&tmp.0)[0].id, "migrated-weekly-notif");
+    }
+
+    #[test]
+    fn corrupt_notifications_file_is_kept_and_not_replaced_by_the_legacy_setting() {
+        let tmp = storage::TempDir::new("notif-corrupt");
+        std::fs::write(tmp.0.join(NOTIFICATIONS_FILE), r#"[{"id":"a","la"#).unwrap();
+        std::fs::write(
+            tmp.0.join(LEGACY_NOTIFICATIONS_FILE),
+            r#"{"enabled":true,"day_of_week":1,"hour":8,"minute":0}"#,
+        )
+        .unwrap();
+        assert!(load_notifications_from(&tmp.0).is_empty());
+        assert!(tmp.0.join("custom_notifications.json.corrupt").exists());
+    }
+
+    // ── validate_notifications() ──────────────────────────────────────────────
+
+    fn invalid(mutate: impl FnOnce(&mut CustomNotification)) -> String {
+        let mut n = base_notif();
+        mutate(&mut n);
+        validate_notifications(&[n]).unwrap_err()
+    }
+
+    #[test]
+    fn accepts_a_valid_list_including_empty_days_and_dates() {
+        let mut n = base_notif();
+        n.days = vec![];
+        n.start_date = Some("2024-02-29".to_string()); // annee bissextile
+        n.end_date = Some("2024-02-29".to_string());
+        let mut other = base_notif();
+        other.id = "other".to_string();
+        assert!(validate_notifications(&[n, other]).is_ok());
+        assert!(validate_notifications(&[]).is_ok());
+    }
+
+    #[test]
+    fn rejects_malformed_times() {
+        for t in ["8:00", "24:00", "12:60", "08:5", "0800", "ab:cd", "", "08:00:00", "+8:00"] {
+            let e = invalid(|n| n.time = t.to_string());
+            assert!(e.contains("time"), "{t:?} aurait du etre refuse : {e}");
+        }
+    }
+
+    #[test]
+    fn accepts_boundary_times() {
+        for t in ["00:00", "23:59"] {
+            let mut n = base_notif();
+            n.time = t.to_string();
+            assert!(validate_notifications(&[n]).is_ok(), "{t}");
+        }
+    }
+
+    #[test]
+    fn rejects_days_out_of_range_or_duplicated() {
+        assert!(invalid(|n| n.days = vec![0]).contains("days"));
+        assert!(invalid(|n| n.days = vec![8]).contains("days"));
+        assert!(invalid(|n| n.days = vec![1, 1]).contains("en double"));
+    }
+
+    #[test]
+    fn rejects_malformed_or_impossible_dates() {
+        for d in ["2026-13-01", "2026-1-1", "2026-02-30", "2025-02-29", "26-01-01", "2026/01/01", ""] {
+            let e = invalid(|n| n.start_date = Some(d.to_string()));
+            assert!(e.contains("start_date"), "{d:?} aurait du etre refuse : {e}");
+            let e = invalid(|n| n.end_date = Some(d.to_string()));
+            assert!(e.contains("end_date"), "{d:?} aurait du etre refuse : {e}");
+        }
+    }
+
+    #[test]
+    fn rejects_start_date_after_end_date() {
+        let e = invalid(|n| {
+            n.start_date = Some("2026-09-02".to_string());
+            n.end_date = Some("2026-09-01".to_string());
+        });
+        assert!(e.contains("posterieure"));
+    }
+
+    #[test]
+    fn rejects_empty_or_duplicated_ids() {
+        assert!(invalid(|n| n.id = String::new()).contains("id"));
+        let a = base_notif();
+        let b = base_notif();
+        assert!(validate_notifications(&[a, b]).unwrap_err().contains("en double"));
+    }
+
+    #[test]
+    fn rejects_oversized_label_and_message() {
+        assert!(invalid(|n| n.label = "a".repeat(MAX_LABEL_CHARS + 1)).contains("label"));
+        assert!(invalid(|n| n.message = "a".repeat(MAX_MESSAGE_CHARS + 1)).contains("message"));
+        let mut ok = base_notif();
+        ok.label = "é".repeat(MAX_LABEL_CHARS); // compte en caracteres, pas en octets
+        assert!(validate_notifications(&[ok]).is_ok());
+    }
+
+    #[test]
+    fn error_names_the_entry_but_never_echoes_user_content() {
+        let mut first = base_notif();
+        first.id = "first".to_string();
+        let mut second = base_notif();
+        second.id = "second".to_string();
+        second.label = "Secret perso".to_string();
+        second.time = "99:99".to_string();
+        let e = validate_notifications(&[first, second]).unwrap_err();
+        assert!(e.contains("notification 2"));
+        assert!(!e.contains("Secret") && !e.contains("99:99"));
     }
 }

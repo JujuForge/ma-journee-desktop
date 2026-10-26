@@ -527,15 +527,15 @@ fn send_notification(app: &tauri::AppHandle, title: &str, body: &str) {
         // Reprend la logique de tauri-plugin-notification (desktop.rs) : ne fixer
         // l'AppUserModelID que pour le binaire installe, pas en dev (sinon l'icone
         // resolue est celle du terminal/cargo plutot que celle de l'app).
-        if let Ok(exe) = tauri::utils::platform::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                let dir = exe_dir.display().to_string();
-                let sep = std::path::MAIN_SEPARATOR;
-                let is_dev_target_dir = dir.ends_with(&format!("{sep}target{sep}debug"))
-                    || dir.ends_with(&format!("{sep}target{sep}release"));
-                if !is_dev_target_dir {
-                    notification.app_id(&app.config().identifier);
-                }
+        if let Ok(exe) = tauri::utils::platform::current_exe()
+            && let Some(exe_dir) = exe.parent()
+        {
+            let dir = exe_dir.display().to_string();
+            let sep = std::path::MAIN_SEPARATOR;
+            let is_dev_target_dir = dir.ends_with(&format!("{sep}target{sep}debug"))
+                || dir.ends_with(&format!("{sep}target{sep}release"));
+            if !is_dev_target_dir {
+                notification.app_id(&app.config().identifier);
             }
         }
     }

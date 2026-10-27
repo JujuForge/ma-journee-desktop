@@ -6,9 +6,9 @@ use std::{
     time::Duration,
 };
 use tauri::{
+    Emitter, Manager,
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
-    Emitter, Manager,
 };
 use tauri_plugin_window_state::WindowExt;
 
@@ -23,8 +23,8 @@ pub struct CustomNotification {
     pub id: String,
     pub label: String,
     pub message: String,
-    pub time: String,               // "HH:MM"
-    pub days: Vec<u32>,             // 1=lundi..7=dimanche (convention ISO, identique a Android)
+    pub time: String,   // "HH:MM"
+    pub days: Vec<u32>, // 1=lundi..7=dimanche (convention ISO, identique a Android)
     pub enabled: bool,
     pub start_date: Option<String>, // "YYYY-MM-DD"
     pub end_date: Option<String>,   // "YYYY-MM-DD"
@@ -94,12 +94,21 @@ fn set_update_notif_enabled(
 #[tauri::command]
 async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
-    let update = app.updater().map_err(|e| e.to_string())?
-        .check().await.map_err(|e| { log::error!("Echec check() pendant install_update: {}", e); e.to_string() })?
+    let update = app
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| {
+            log::error!("Echec check() pendant install_update: {}", e);
+            e.to_string()
+        })?
         .ok_or_else(|| "Aucune mise a jour disponible".to_string())?;
     log::info!("Installation de la mise a jour v{}", update.version);
-    update.download_and_install(|_, _| {}, || {}).await
-        .map_err(|e| { log::error!("Echec telechargement/installation: {}", e); e.to_string() })?;
+    update.download_and_install(|_, _| {}, || {}).await.map_err(|e| {
+        log::error!("Echec telechargement/installation: {}", e);
+        e.to_string()
+    })?;
     app.restart();
 }
 
@@ -165,11 +174,17 @@ fn open_url(url: String) -> Result<(), String> {
 #[tauri::command]
 fn get_platform() -> &'static str {
     #[cfg(target_os = "linux")]
-    { "linux" }
+    {
+        "linux"
+    }
     #[cfg(target_os = "windows")]
-    { "windows" }
+    {
+        "windows"
+    }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    { "other" }
+    {
+        "other"
+    }
 }
 
 #[tauri::command]
@@ -222,10 +237,7 @@ fn load_app_settings(app: &tauri::AppHandle) -> DesktopAppSettings {
 }
 
 fn crash_log_path(app: &tauri::AppHandle) -> std::path::PathBuf {
-    app.path()
-        .app_log_dir()
-        .unwrap_or_else(|_| std::env::temp_dir())
-        .join("last_panic.log")
+    app.path().app_log_dir().unwrap_or_else(|_| std::env::temp_dir()).join("last_panic.log")
 }
 
 /// Si l'app a plante lors de la session precedente (cf. `install_panic_hook`), reverse
@@ -345,8 +357,7 @@ fn load_notifications_from(dir: &Path) -> Vec<CustomNotification> {
         LoadResult::Missing => {}
     }
 
-    let LoadResult::Loaded(cfg) =
-        storage::load_json::<LegacyWeeklyNotifConfig>(&dir.join(LEGACY_NOTIFICATIONS_FILE))
+    let LoadResult::Loaded(cfg) = storage::load_json::<LegacyWeeklyNotifConfig>(&dir.join(LEGACY_NOTIFICATIONS_FILE))
     else {
         return Vec::new();
     };
@@ -396,18 +407,14 @@ const MAX_MESSAGE_CHARS: usize = 2000;
 fn is_valid_time(s: &str) -> bool {
     let Some((h, m)) = s.split_once(':') else { return false };
     let two_digits = |p: &str| p.len() == 2 && p.bytes().all(|b| b.is_ascii_digit());
-    two_digits(h)
-        && two_digits(m)
-        && h.parse::<u32>().is_ok_and(|h| h < 24)
-        && m.parse::<u32>().is_ok_and(|m| m < 60)
+    two_digits(h) && two_digits(m) && h.parse::<u32>().is_ok_and(|h| h < 24) && m.parse::<u32>().is_ok_and(|m| m < 60)
 }
 
 /// `YYYY-MM-DD` strict, date calendaire reelle (jours du mois et annees bissextiles). Le format
 /// fixe est ce qui rend valide la comparaison lexicographique de `should_fire_now`.
 fn is_valid_date(s: &str) -> bool {
     let mut parts = s.split('-');
-    let (Some(y), Some(m), Some(d), None) = (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
+    let (Some(y), Some(m), Some(d), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
         return false;
     };
     let digits = |p: &str, n: usize| p.len() == n && p.bytes().all(|b| b.is_ascii_digit());
@@ -417,10 +424,7 @@ fn is_valid_date(s: &str) -> bool {
     let (Ok(y), Ok(m), Ok(d)) = (y.parse::<i32>(), m.parse::<u8>(), d.parse::<u8>()) else {
         return false;
     };
-    time::Month::try_from(m)
-        .ok()
-        .and_then(|month| time::Date::from_calendar_date(y, month, d).ok())
-        .is_some()
+    time::Month::try_from(m).ok().and_then(|month| time::Date::from_calendar_date(y, month, d).ok()).is_some()
 }
 
 /// Verifie la liste recue du frontend (distant) avant de la persister. Le message d'erreur
@@ -474,8 +478,7 @@ fn start_notification_loop(notifications: SharedNotifications, app: tauri::AppHa
         loop {
             thread::sleep(Duration::from_secs(30));
             let list = notifications.lock().unwrap().clone();
-            let now = time::OffsetDateTime::now_local()
-                .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+            let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
             let day = now.weekday().number_from_monday() as u32;
             let hour = now.hour() as u32;
             let minute = now.minute() as u32;
@@ -532,8 +535,8 @@ fn send_notification(app: &tauri::AppHandle, title: &str, body: &str) {
         {
             let dir = exe_dir.display().to_string();
             let sep = std::path::MAIN_SEPARATOR;
-            let is_dev_target_dir = dir.ends_with(&format!("{sep}target{sep}debug"))
-                || dir.ends_with(&format!("{sep}target{sep}release"));
+            let is_dev_target_dir =
+                dir.ends_with(&format!("{sep}target{sep}debug")) || dir.ends_with(&format!("{sep}target{sep}release"));
             if !is_dev_target_dir {
                 notification.app_id(&app.config().identifier);
             }
@@ -587,9 +590,7 @@ async fn check_for_update(
             log::info!("Mise a jour disponible: v{}", version);
             *pending_update.lock().unwrap() = Some(version.clone());
             // N'avertit qu'une seule fois par version detectee, meme si le check tourne en boucle
-            if already_known.as_deref() != Some(version.as_str())
-                && app_settings.lock().unwrap().update_notif_enabled
-            {
+            if already_known.as_deref() != Some(version.as_str()) && app_settings.lock().unwrap().update_notif_enabled {
                 send_notification(
                     app,
                     "Mise à jour disponible",
@@ -650,7 +651,9 @@ fn disable_gtk_global_appmenu() {
         // `set_var` est unsafe depuis l'edition 2024 (non thread-safe en general), mais sans
         // risque ici : appele en tout premier dans `run()`, avant que quoi que ce soit
         // (Tauri, GTK...) n'ait demarre le moindre thread susceptible de lire l'environnement.
-        unsafe { std::env::set_var("GTK_MODULES", filtered.join(":")); }
+        unsafe {
+            std::env::set_var("GTK_MODULES", filtered.join(":"));
+        }
     }
 }
 
@@ -1083,10 +1086,9 @@ mod tests {
 
     #[test]
     fn notification_json_without_date_keys_loads_as_none() {
-        let n: CustomNotification = serde_json::from_str(
-            r#"{"id":"x","label":"L","message":"M","time":"08:00","days":[1],"enabled":true}"#,
-        )
-        .unwrap();
+        let n: CustomNotification =
+            serde_json::from_str(r#"{"id":"x","label":"L","message":"M","time":"08:00","days":[1],"enabled":true}"#)
+                .unwrap();
         assert_eq!(n.start_date, None);
         assert_eq!(n.end_date, None);
     }

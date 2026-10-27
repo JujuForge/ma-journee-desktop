@@ -51,11 +51,28 @@ pub struct DesktopAppSettings {
     pub update_notif_enabled: bool,
     #[serde(default)]
     pub tray_hint_shown: bool,
+    #[serde(default)]
+    pub appearance: Appearance,
 }
 
 impl Default for DesktopAppSettings {
     fn default() -> Self {
-        Self { update_notif_enabled: true, tray_hint_shown: false }
+        Self { update_notif_enabled: true, tray_hint_shown: false, appearance: Appearance::default() }
+    }
+}
+
+/// Theme ("system", "light", "dark") et couleur d'accent ("amber", "violet"...) choisis sur le
+/// site, stockes dans son localStorage (`mj_theme`, `mj_accent`). Memorises ici pour que l'ecran
+/// de verrouillage, page locale d'une autre origine, reprenne l'apparence de l'app.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct Appearance {
+    pub theme: String,
+    pub accent: String,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self { theme: "system".to_string(), accent: "amber".to_string() }
     }
 }
 
@@ -94,6 +111,41 @@ fn set_update_notif_enabled(
     })?;
     *settings = updated;
     log::info!("Notification de mise a jour {}", if enabled { "activee" } else { "desactivee" });
+    Ok(())
+}
+
+/// Script execute dans la fenetre principale pour relever l'apparence choisie sur le site.
+const REPORT_APPEARANCE_JS: &str = "try{window.__TAURI__.core.invoke('set_appearance',{theme:localStorage.getItem('mj_theme')||'system',accent:localStorage.getItem('mj_accent')||'amber'}).catch(function(){});}catch(e){}";
+
+/// Valeurs inconnues ignorees cote ecran de verrouillage (accent par defaut) ; le format reste
+/// borne car il vient de la page distante.
+fn is_valid_appearance(appearance: &Appearance) -> bool {
+    matches!(appearance.theme.as_str(), "system" | "light" | "dark")
+        && (1..=16).contains(&appearance.accent.len())
+        && appearance.accent.bytes().all(|b| b.is_ascii_lowercase())
+}
+
+#[tauri::command]
+fn set_appearance(
+    state: tauri::State<'_, SharedAppSettings>,
+    app: tauri::AppHandle,
+    theme: String,
+    accent: String,
+) -> Result<(), String> {
+    let appearance = Appearance { theme, accent };
+    if !is_valid_appearance(&appearance) {
+        return Err("Apparence invalide".to_string());
+    }
+    let mut settings = state.lock().unwrap();
+    // Appele a chaque chargement de page : n'ecrit sur disque qu'en cas de changement.
+    if settings.appearance == appearance {
+        return Ok(());
+    }
+    let updated = DesktopAppSettings { appearance, ..settings.clone() };
+    save_app_settings(&app, &updated).inspect_err(|e| {
+        log::error!("Echec sauvegarde des reglages de l'app : {}", e);
+    })?;
+    *settings = updated;
     Ok(())
 }
 
@@ -608,9 +660,14 @@ fn start_notification_loop(notifications: SharedNotifications, app: tauri::AppHa
 /// affiche l'ecran de verrouillage a la place.
 fn show_and_focus_main_window(app: &tauri::AppHandle) {
     if lock::is_locked(app) {
-        lock::show_window(app, lock::Mode::Unlock);
-        return;
+        lock::show_locked(app);
+    } else {
+        focus_main_window(app);
     }
+}
+
+/// Affiche la fenetre principale sans tenir compte du verrou (voir `lock::show_locked`).
+fn focus_main_window(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.set_focus();
@@ -829,7 +886,7 @@ pub fn run() {
                 .build(),
         )
         // Page locale de l'ecran de verrouillage (fonctionne hors ligne, voir lock.rs)
-        .register_uri_scheme_protocol(lock::PROTOCOL, |_ctx, request| lock::serve_page(&request))
+        .register_uri_scheme_protocol(lock::PROTOCOL, |_ctx, request| lock::serve_asset(&request))
         .manage(notifications.clone())
         .manage(pending_update.clone())
         .manage(app_settings.clone())
@@ -933,6 +990,12 @@ pub fn run() {
                     if(a.target==='_blank'||a.protocol==='mailto:'){e.preventDefault();openExt(a.href);}
                 },true);
             })();"#)
+            .on_page_load(|w, payload| {
+                if payload.event() == tauri::webview::PageLoadEvent::Started {
+                    lock::on_main_page_started(w.app_handle());
+                }
+            })
+            .initialization_script(format!("document.addEventListener('DOMContentLoaded',function(){{{REPORT_APPEARANCE_JS}}});"))
             .on_navigation(move |url| match navigation_action(url, frontend_host) {
                 NavigationAction::Stay => true,
                 NavigationAction::OpenExternally => {
@@ -1046,10 +1109,11 @@ pub fn run() {
             get_custom_notifications, set_custom_notifications,
             get_pending_update, check_for_update_now, install_update, get_platform, get_app_version,
             get_autostart, set_autostart, open_url,
-            get_update_notif_enabled, set_update_notif_enabled,
+            get_update_notif_enabled, set_update_notif_enabled, set_appearance,
             notify, open_log_folder, update_tray_status,
             lock::lock_status, lock::lock_unlock_with_code, lock::lock_unlock_with_hello,
-            lock::lock_configure, lock::lock_reset, lock::open_lock_settings
+            lock::lock_configure, lock::lock_reset, lock::open_lock_settings,
+            lock::lock_web_register, lock::lock_screen_ready
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1242,6 +1306,28 @@ mod tests {
         let s: DesktopAppSettings = serde_json::from_str(r#"{"update_notif_enabled":false}"#).unwrap();
         assert!(!s.update_notif_enabled);
         assert!(!s.tray_hint_shown);
+        assert_eq!(s.appearance, Appearance::default());
+    }
+
+    // ── is_valid_appearance() ─────────────────────────────────────────────────
+
+    #[test]
+    fn accepts_site_themes_and_accent_keys() {
+        for theme in ["system", "light", "dark"] {
+            assert!(is_valid_appearance(&Appearance { theme: theme.to_string(), accent: "violet".to_string() }));
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_theme_or_malformed_accent() {
+        let check = |theme: &str, accent: &str| {
+            is_valid_appearance(&Appearance { theme: theme.to_string(), accent: accent.to_string() })
+        };
+        assert!(!check("sepia", "amber"));
+        assert!(!check("dark", ""));
+        assert!(!check("dark", "Amber"));
+        assert!(!check("dark", "#cb4f00"));
+        assert!(!check("dark", &"a".repeat(17)));
     }
 
     // ── load_notifications_from() / save_notifications_in() ───────────────────

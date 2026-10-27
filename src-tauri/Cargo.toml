@@ -29,7 +29,7 @@ opener = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 time = { version = "0.3.49", features = ["local-offset"] }
-argon2 = { version = "0.5", features = ["std"] }
+argon2 = "0.6"
 
 # Windows Hello (verrouillage) : deja tires par Tauri, aucune version supplementaire compilee.
 [target.'cfg(windows)'.dependencies]

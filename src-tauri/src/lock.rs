@@ -1,8 +1,10 @@
 //! Verrouillage local de l'app (ecran de confidentialite sur un ordinateur partage).
 //!
-//! Le code est stocke hache (Argon2) dans `lock.json`. Pendant le verrouillage, la fenetre
-//! principale reste chargee mais cachee ; l'ecran de verrouillage est une fenetre separee, servie
-//! par le protocole local `lockscreen` (fonctionne donc hors ligne). Ce n'est pas un chiffrement :
+//! Le code est stocke hache (Argon2) dans `lock.json` ; etat, declencheurs, verification et
+//! masquage restent ici. L'ecran lui-meme est affiche par le site dans la fenetre principale, qui
+//! reste cachee tant qu'il ne l'a pas signale (`lock_screen_ready`). Sinon (site injoignable,
+//! ancienne version, pas de reponse sous `WEB_LOCK_TIMEOUT`), une page locale de secours s'ouvre
+//! dans une fenetre separee, servie par le protocole `lockscreen`. Ce n'est pas un chiffrement :
 //! quiconque accede aux fichiers du compte systeme peut supprimer `lock.json`.
 
 use std::{
@@ -13,10 +15,10 @@ use std::{
 };
 
 use argon2::{
-    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
-    password_hash::{SaltString, rand_core::OsRng},
+    Argon2,
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
-use tauri::{Manager, http};
+use tauri::{Emitter, Manager, http};
 
 use crate::storage::{self, LoadResult};
 
@@ -26,13 +28,42 @@ mod hello;
 const LOCK_FILE: &str = "lock.json";
 const LOCK_WINDOW: &str = "lock";
 pub const PROTOCOL: &str = "lockscreen";
-const PAGE: &str = include_str!("../lockscreen/index.html");
+/// Fichiers de la page locale (chemin, type, contenu), embarques dans le binaire.
+const ASSETS: &[(&str, &str, &[u8])] = &[
+    ("/", "text/html; charset=utf-8", include_bytes!("../lockscreen/index.html")),
+    ("/logo.png", "image/png", include_bytes!("../icons/128x128@2x.png")),
+    (
+        "/fonts/inter-latin-400-normal.woff2",
+        "font/woff2",
+        include_bytes!("../lockscreen/fonts/inter-latin-400-normal.woff2"),
+    ),
+    (
+        "/fonts/inter-latin-500-normal.woff2",
+        "font/woff2",
+        include_bytes!("../lockscreen/fonts/inter-latin-500-normal.woff2"),
+    ),
+    (
+        "/fonts/inter-latin-600-normal.woff2",
+        "font/woff2",
+        include_bytes!("../lockscreen/fonts/inter-latin-600-normal.woff2"),
+    ),
+    (
+        "/fonts/inter-latin-700-normal.woff2",
+        "font/woff2",
+        include_bytes!("../lockscreen/fonts/inter-latin-700-normal.woff2"),
+    ),
+];
 const DEFAULT_TRAY_TEXT: &str = "Ma Journée";
 const LOCKED_TRAY_TEXT: &str = "Ma Journée (verrouillée)";
 const MIN_CODE_CHARS: usize = 4;
 const MAX_CODE_CHARS: usize = 128;
 const UNREADABLE: &str = "Les réglages du verrou sont illisibles : utilisez « Code oublié ? ».";
 const WATCHDOG_TICK: Duration = Duration::from_secs(15);
+/// Delai laisse au site pour afficher son ecran avant d'ouvrir la page locale de secours.
+const WEB_LOCK_TIMEOUT: Duration = Duration::from_secs(3);
+const MAIN_WINDOW: &str = "main";
+/// Evenement envoye a la fenetre principale a chaque verrouillage ou deverrouillage.
+const LOCK_EVENT: &str = "lock-state-changed";
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct LockConfig {
@@ -55,6 +86,12 @@ pub struct LockState {
     retry_at: Option<Instant>,
     /// Dernier statut envoye par le site, reaffiche dans le tray au deverrouillage.
     tray_text: Option<String>,
+    /// La page chargee gere l'ecran de verrouillage et ses reglages (`lock_web_register`).
+    web_supported: bool,
+    /// L'ecran de verrouillage du site est affiche : la fenetre principale peut apparaitre.
+    overlay_shown: bool,
+    /// Affichage demande pendant le verrouillage, en attente de l'ecran du site.
+    pending_show: bool,
 }
 
 pub type SharedLock = Arc<Mutex<LockState>>;
@@ -81,6 +118,42 @@ impl LockState {
     fn retry_in(&self) -> Duration {
         self.retry_at.map(|t| t.saturating_duration_since(Instant::now())).unwrap_or_default()
     }
+
+    /// Affichage demande alors que l'app est verrouillee : `true` si l'ecran du site est deja
+    /// affiche (montrer la fenetre principale), sinon l'affichage est mis en attente.
+    fn request_show(&mut self) -> bool {
+        self.pending_show = !self.overlay_shown;
+        self.overlay_shown
+    }
+
+    /// Fin du delai d'attente : `true` s'il faut ouvrir la page locale de secours.
+    fn take_pending(&mut self) -> bool {
+        let fallback = self.pending_show && self.locked;
+        self.pending_show = false;
+        fallback
+    }
+
+    /// Le site a affiche son ecran. `None` si l'app n'est pas verrouillee (signal ignore), sinon
+    /// `Some(true)` si un affichage etait en attente.
+    fn overlay_ready(&mut self) -> Option<bool> {
+        if !self.locked {
+            return None;
+        }
+        self.overlay_shown = true;
+        Some(std::mem::take(&mut self.pending_show))
+    }
+
+    /// Nouvelle page dans la fenetre principale : elle devra s'annoncer de nouveau.
+    fn page_started(&mut self) {
+        self.web_supported = false;
+        self.overlay_shown = false;
+    }
+
+    fn set_locked(&mut self, locked: bool) {
+        self.locked = locked;
+        self.overlay_shown = false;
+        self.pending_show = false;
+    }
 }
 
 /// Charge `lock.json` : l'app demarre verrouillee si le verrou est actif.
@@ -96,8 +169,8 @@ pub fn load(app: &tauri::AppHandle) -> SharedLock {
 }
 
 fn hash_code(code: &str) -> Result<String, String> {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default().hash_password(code.as_bytes(), &salt).map(|h| h.to_string()).map_err(|e| e.to_string())
+    // Sel aleatoire genere par argon2 (source d'entropie du systeme).
+    Argon2::default().hash_password(code.as_bytes()).map(|h| h.to_string()).map_err(|e| e.to_string())
 }
 
 fn verify_code(code: &str, hash: &str) -> bool {
@@ -184,9 +257,14 @@ pub fn lock_now(app: &tauri::AppHandle) -> bool {
         if !s.is_active() || s.locked {
             return false;
         }
-        s.locked = true;
+        s.set_locked(true);
     }
     log::info!("Application verrouillee");
+    emit_lock_state(app, true);
+    // Releve le theme courant du site pour l'ecran de verrouillage (voir `set_appearance`).
+    if let Some(main) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = main.eval(crate::REPORT_APPEARANCE_JS);
+    }
     refresh_tray(app);
     // Ecran de reglages ouvert : bascule sur le deverrouillage.
     if app.get_webview_window(LOCK_WINDOW).is_some() {
@@ -201,11 +279,11 @@ fn lock_after_sleep(app: &tauri::AppHandle) {
     if !lock_now(app) {
         return;
     }
-    if let Some(main) = app.get_webview_window("main")
+    if let Some(main) = app.get_webview_window(MAIN_WINDOW)
         && main.is_visible().unwrap_or(false)
     {
         let _ = main.hide();
-        show_window(app, Mode::Unlock);
+        show_locked(app);
     }
 }
 
@@ -224,6 +302,39 @@ pub fn start_sleep_watchdog(app: tauri::AppHandle) {
     });
 }
 
+#[derive(Clone, serde::Serialize)]
+struct LockChanged {
+    locked: bool,
+}
+
+fn emit_lock_state(app: &tauri::AppHandle, locked: bool) {
+    let _ = app.emit_to(MAIN_WINDOW, LOCK_EVENT, LockChanged { locked });
+}
+
+/// L'app verrouillee doit apparaitre (tray, notification, second lancement...) : fenetre
+/// principale si l'ecran du site est affiche, sinon attente de celui-ci puis page de secours.
+pub fn show_locked(app: &tauri::AppHandle) {
+    if state(app).lock().unwrap().request_show() {
+        crate::focus_main_window(app);
+        return;
+    }
+    let app = app.clone();
+    thread::spawn(move || {
+        thread::sleep(WEB_LOCK_TIMEOUT);
+        if state(&app).lock().unwrap().take_pending() {
+            log::warn!("Ecran de verrouillage du site indisponible, page locale affichee");
+            show_window(&app, Mode::Unlock);
+        }
+    });
+}
+
+/// Appele au debut de chaque chargement de page dans la fenetre principale.
+pub fn on_main_page_started(app: &tauri::AppHandle) {
+    if let Some(st) = app.try_state::<SharedLock>() {
+        st.lock().unwrap().page_started();
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum Mode {
     Unlock,
@@ -235,13 +346,12 @@ fn page_base() -> String {
     if cfg!(windows) { format!("http://{PROTOCOL}.localhost/") } else { format!("{PROTOCOL}://localhost/") }
 }
 
-pub fn serve_page(request: &http::Request<Vec<u8>>) -> http::Response<Cow<'static, [u8]>> {
-    let response = if request.uri().path() == "/" {
-        http::Response::builder()
-            .header(http::header::CONTENT_TYPE, "text/html; charset=utf-8")
-            .body(Cow::Borrowed(PAGE.as_bytes()))
-    } else {
-        http::Response::builder().status(http::StatusCode::NOT_FOUND).body(Cow::Borrowed(&[][..]))
+pub fn serve_asset(request: &http::Request<Vec<u8>>) -> http::Response<Cow<'static, [u8]>> {
+    let response = match ASSETS.iter().find(|(path, ..)| *path == request.uri().path()) {
+        Some((_, mime, body)) => {
+            http::Response::builder().header(http::header::CONTENT_TYPE, *mime).body(Cow::Borrowed(*body))
+        }
+        None => http::Response::builder().status(http::StatusCode::NOT_FOUND).body(Cow::Borrowed(&[][..])),
     };
     response.expect("en-tetes statiques valides")
 }
@@ -249,8 +359,8 @@ pub fn serve_page(request: &http::Request<Vec<u8>>) -> http::Response<Cow<'stati
 /// Affiche l'ecran de verrouillage (ou de reglage du verrou), en le creant si besoin.
 pub fn show_window(app: &tauri::AppHandle, mode: Mode) {
     let (query, title) = match mode {
-        Mode::Unlock => ("?mode=unlock", "Ma Journée – Verrouillée"),
-        Mode::Setup => ("?mode=setup", "Ma Journée – Verrouillage"),
+        Mode::Unlock => ("?mode=unlock", "Ma Journée verrouillée"),
+        Mode::Setup => ("?mode=setup", "Verrouillage de Ma Journée"),
     };
     let base = page_base();
     let url: tauri::Url = format!("{base}{query}").parse().expect("URL locale valide");
@@ -268,7 +378,7 @@ pub fn show_window(app: &tauri::AppHandle, mode: Mode) {
 
     let result = tauri::WebviewWindowBuilder::new(app, LOCK_WINDOW, tauri::WebviewUrl::CustomProtocol(url))
         .title(title)
-        .inner_size(420.0, 560.0)
+        .inner_size(440.0, 660.0)
         .resizable(false)
         .maximizable(false)
         .center()
@@ -281,14 +391,28 @@ pub fn show_window(app: &tauri::AppHandle, mode: Mode) {
     }
 }
 
-/// Reglages du verrou (menu Fichier, ou site) : ecran de deverrouillage si l'app est verrouillee.
+/// Reglages du verrou (menu Fichier) : dans le site s'il les gere, sinon page locale. Ecran de
+/// deverrouillage si l'app est verrouillee.
 pub fn open_settings(app: &tauri::AppHandle) {
-    show_window(app, if is_locked(app) { Mode::Unlock } else { Mode::Setup });
+    let (locked, web_supported) = {
+        let st = state(app);
+        let s = st.lock().unwrap();
+        (s.locked, s.web_supported)
+    };
+    if locked {
+        show_locked(app);
+    } else if web_supported {
+        crate::focus_main_window(app);
+        let _ = app.emit_to(MAIN_WINDOW, "native-menu", "lockSettings");
+    } else {
+        show_window(app, Mode::Setup);
+    }
 }
 
 fn unlock(app: &tauri::AppHandle, st: &SharedLock) {
-    st.lock().unwrap().locked = false;
+    st.lock().unwrap().set_locked(false);
     log::info!("Application deverrouillee");
+    emit_lock_state(app, false);
     refresh_tray(app);
     if let Some(w) = app.get_webview_window(LOCK_WINDOW) {
         let _ = w.close();
@@ -296,16 +420,20 @@ fn unlock(app: &tauri::AppHandle, st: &SharedLock) {
     crate::show_and_focus_main_window(app);
 }
 
-/// Les commandes qui modifient le verrou ne repondent qu'a l'ecran de verrouillage : le label de la
-/// fenetre appelante est fixe par Tauri, la page distante ne peut donc ni deverrouiller, ni
-/// desactiver le verrou, ni lancer la reinitialisation.
-fn require_lock_window(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() == LOCK_WINDOW {
+/// Fenetres autorisees a piloter le verrou : la principale (ecran du site) et la page locale de
+/// secours. Le label est fixe par Tauri. Le site est de confiance : compromis, il verrait de toute
+/// facon les donnees ; le verrou protege contre une personne devant l'ordinateur.
+fn require_lock_ui(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == MAIN_WINDOW || window.label() == LOCK_WINDOW {
         Ok(())
     } else {
         log::warn!("Commande de verrouillage refusee depuis la fenetre '{}'", window.label());
         Err("Action réservée à l'écran de verrouillage.".to_string())
     }
+}
+
+fn require_main_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == MAIN_WINDOW { Ok(()) } else { Err("Action réservée à la fenêtre principale.".to_string()) }
 }
 
 fn wait_message(wait: Duration) -> String {
@@ -374,11 +502,15 @@ pub struct LockStatus {
     hello_available: bool,
     hello_enabled: bool,
     retry_in_secs: u64,
+    /// Apparence du site (theme, couleur d'accent), reprise par l'ecran de verrouillage.
+    theme: String,
+    accent: String,
 }
 
 #[tauri::command]
 pub async fn lock_status(app: tauri::AppHandle) -> Result<LockStatus, String> {
     let hello_available = hello_available().await;
+    let appearance = app.state::<crate::SharedAppSettings>().lock().unwrap().appearance.clone();
     let st = state(&app);
     let s = st.lock().unwrap();
     Ok(LockStatus {
@@ -388,6 +520,8 @@ pub async fn lock_status(app: tauri::AppHandle) -> Result<LockStatus, String> {
         hello_available,
         hello_enabled: s.config.hello_enabled,
         retry_in_secs: s.retry_in().as_millis().div_ceil(1000) as u64,
+        theme: appearance.theme,
+        accent: appearance.accent,
     })
 }
 
@@ -397,7 +531,7 @@ pub async fn lock_unlock_with_code(
     window: tauri::WebviewWindow,
     code: String,
 ) -> Result<(), String> {
-    require_lock_window(&window)?;
+    require_lock_ui(&window)?;
     let st = state(&app);
     {
         let s = st.lock().unwrap();
@@ -415,7 +549,7 @@ pub async fn lock_unlock_with_code(
 
 #[tauri::command]
 pub async fn lock_unlock_with_hello(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
-    require_lock_window(&window)?;
+    require_lock_ui(&window)?;
     let st = state(&app);
     {
         let s = st.lock().unwrap();
@@ -451,7 +585,7 @@ pub async fn lock_configure(
     window: tauri::WebviewWindow,
     settings: LockSettings,
 ) -> Result<(), String> {
-    require_lock_window(&window)?;
+    require_lock_ui(&window)?;
     let st = state(&app);
     let was_enabled = {
         let s = st.lock().unwrap();
@@ -497,12 +631,12 @@ pub async fn lock_configure(
 /// stockage local), ce qui deconnecte le compte. Le contenu reste ainsi protege.
 #[tauri::command]
 pub async fn lock_reset(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
-    require_lock_window(&window)?;
+    require_lock_ui(&window)?;
     let st = state(&app);
     if !st.lock().unwrap().locked {
         return Err("L'application n'est pas verrouillée.".to_string());
     }
-    let main = app.get_webview_window("main").ok_or("Fenêtre principale introuvable.")?;
+    let main = app.get_webview_window(MAIN_WINDOW).ok_or("Fenêtre principale introuvable.")?;
     main.clear_all_browsing_data().map_err(|e| {
         log::error!("Echec effacement des donnees de navigation : {}", e);
         e.to_string()
@@ -528,6 +662,32 @@ pub async fn open_lock_settings(app: tauri::AppHandle) {
     open_settings(&app);
 }
 
+/// Le site annonce qu'il gere l'ecran de verrouillage et ses reglages (a chaque chargement de
+/// page, le plus tot possible). Retourne l'etat courant.
+#[tauri::command]
+pub async fn lock_web_register(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<LockStatus, String> {
+    require_main_window(&window)?;
+    state(&app).lock().unwrap().web_supported = true;
+    lock_status(app).await
+}
+
+/// Le site signale que son ecran de verrouillage est affiche (et le reste de la page inerte) : la
+/// fenetre principale peut apparaitre, a la place de la page locale de secours si elle est ouverte.
+#[tauri::command]
+pub fn lock_screen_ready(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    require_main_window(&window)?;
+    let Some(pending) = state(&app).lock().unwrap().overlay_ready() else {
+        return Ok(());
+    };
+    if let Some(fallback) = app.get_webview_window(LOCK_WINDOW) {
+        let _ = fallback.close();
+        crate::focus_main_window(&app);
+    } else if pending {
+        crate::focus_main_window(&app);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,6 +706,26 @@ mod tests {
     #[test]
     fn same_code_gets_a_different_salt_each_time() {
         assert_ne!(hash_code("1234").unwrap(), hash_code("1234").unwrap());
+    }
+
+    #[test]
+    fn hash_created_by_argon2_0_5_still_verifies() {
+        // Code "1234" hache par la version precedente d'argon2 : le format PHC est stable.
+        let hash = "$argon2id$v=19$m=19456,t=2,p=1$ZI8cJBe5FGsyPy7aPAcQYw$xkqvbFl1AaPLmNbN+J18REIA+cTbnlrPIAtTZBML2g4";
+        assert!(verify_code("1234", hash));
+        assert!(!verify_code("1235", hash));
+    }
+
+    #[test]
+    fn page_assets_are_served_and_unknown_paths_are_not_found() {
+        let get = |path: &str| serve_asset(&http::Request::get(path).body(Vec::new()).unwrap());
+        let page = get("/?mode=unlock");
+        assert_eq!(page.status(), http::StatusCode::OK);
+        assert!(page.headers()[http::header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"));
+        assert_eq!(get("/fonts/inter-latin-400-normal.woff2").headers()[http::header::CONTENT_TYPE], "font/woff2");
+        assert_eq!(get("/logo.png").status(), http::StatusCode::OK);
+        assert_eq!(get("/../lock.json").status(), http::StatusCode::NOT_FOUND);
+        assert_eq!(get("/inconnu").status(), http::StatusCode::NOT_FOUND);
     }
 
     #[test]
@@ -643,6 +823,61 @@ mod tests {
         let config = enabled_config();
         storage::save_json(&path, &config).unwrap();
         assert!(matches!(storage::load_json::<LockConfig>(&path), LoadResult::Loaded(c) if c == config));
+    }
+
+    // ── Affichage pendant le verrouillage (ecran du site / page de secours) ───
+
+    fn locked_state() -> LockState {
+        LockState::from_load(LoadResult::Loaded(enabled_config()))
+    }
+
+    #[test]
+    fn show_waits_for_the_site_screen_then_falls_back() {
+        let mut s = locked_state();
+        assert!(!s.request_show());
+        assert!(s.take_pending());
+        // Une seule page de secours par demande.
+        assert!(!s.take_pending());
+    }
+
+    #[test]
+    fn site_screen_ready_shows_the_main_window() {
+        let mut s = locked_state();
+        assert!(!s.request_show());
+        assert_eq!(s.overlay_ready(), Some(true));
+        assert!(!s.take_pending());
+        // Ecran deja affiche : les demandes suivantes montrent directement la fenetre.
+        assert!(s.request_show());
+    }
+
+    #[test]
+    fn ready_signal_is_ignored_when_unlocked() {
+        let mut s = LockState::default();
+        assert_eq!(s.overlay_ready(), None);
+        assert!(!s.overlay_shown);
+    }
+
+    #[test]
+    fn new_page_or_new_lock_must_show_the_site_screen_again() {
+        let mut s = locked_state();
+        s.web_supported = true;
+        s.overlay_ready();
+        s.page_started();
+        assert!(!s.web_supported && !s.request_show());
+
+        let mut s = locked_state();
+        s.overlay_ready();
+        s.set_locked(false);
+        s.set_locked(true);
+        assert!(!s.request_show());
+    }
+
+    #[test]
+    fn unlocking_cancels_a_pending_fallback() {
+        let mut s = locked_state();
+        s.request_show();
+        s.set_locked(false);
+        assert!(!s.take_pending());
     }
 
     // ── tray_text() ───────────────────────────────────────────────────────────

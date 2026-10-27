@@ -1,119 +1,335 @@
 <!doctype html>
-<html lang="fr">
+<html lang="fr" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ma Journée</title>
 <style>
-  :root {
-    --bg: #f6f7f9; --card: #ffffff; --text: #1d2330; --muted: #5d6676; --border: #d5dae2;
-    --accent: #3b6fd8; --accent-text: #ffffff; --danger: #c43d3d; --ok: #2f8a4c;
-    color-scheme: light dark;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #16191f; --card: #1f232b; --text: #e7eaf0; --muted: #9aa3b2; --border: #353b46;
-      --accent: #6d97ee; --accent-text: #0f1420; --danger: #ec6b6b; --ok: #5fc27f;
-    }
-  }
-  * { box-sizing: border-box; }
-  html, body { height: 100%; margin: 0; }
-  body {
-    background: var(--bg); color: var(--text);
-    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Ubuntu, Cantarell, sans-serif;
-    display: flex; align-items: center; justify-content: center; padding: 24px;
+/* Composants copies de majournee.com (css/base.css, layout.css, form.css) : garder synchronise.
+   Page locale (hors ligne) : polices et logo servis par le protocole lockscreen (lock.rs). */
+
+/* ── Polices ──────────────────────────────────────────────────────────────── */
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 400; src: url('fonts/inter-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 500; src: url('fonts/inter-latin-500-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 600; src: url('fonts/inter-latin-600-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 700; src: url('fonts/inter-latin-700-normal.woff2') format('woff2'); }
+
+/* ── Variables thème clair ────────────────────────────────────────────────── */
+:root {
+    --color-primary:         #cb4f00;
+    --color-primary-light:   rgba(203,79,0,0.13);
+    --color-primary-text:    #cb4f00;
+    --color-bg:              #F5F5F7;
+    --color-surface:         #FFFFFF;
+    --color-surface-2:       #F0F0F3;
+    --color-border:          rgba(0,0,0,0.08);
+    --color-text:            #111111;
+    --color-text-secondary:  #6B6B6B;
+    --color-text-disabled:   #AAAAAA;
+    --color-error:           #D0021B;
+    --color-error-light:     rgba(208,2,27,0.10);
+    --color-success:         #1E8449;
+    --color-checkbox:        #C8C8CC;
+    --shadow-card:           0 1px 3px rgba(0,0,0,0.08), 0 0 0 1px rgba(0,0,0,0.04);
+    --shadow-dropdown:       0 4px 16px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.06);
+    --radius-card:           12px;
+    --radius-btn:            10px;
+    --font-size-sm:          0.875rem;
+    --font-size-base:        1rem;
+    --font-size-md:          1.0625rem;
+    --font-size-lg:          1.25rem;
+}
+
+[data-theme="dark"] {
+    --color-primary:         #cb4f00;
+    --color-primary-light:   rgba(203,79,0,0.13);
+    --color-primary-text:    #f05d00;
+    --color-bg:              #18191a;
+    --color-surface:         #242526;
+    --color-surface-2:       #2c2f33;
+    --color-border:          rgba(255,255,255,0.12);
+    --color-text:            #e4e6eb;
+    --color-text-secondary:  #b0b3b8;
+    --color-text-disabled:   #636366;
+    --color-error:           #FF453A;
+    --color-error-light:     rgba(255,69,58,0.12);
+    --color-success:         #30D158;
+    --color-checkbox:        #636366;
+    --shadow-card:           0 1px 3px rgba(0,0,0,0.30), 0 0 0 1px rgba(255,255,255,0.07);
+    --shadow-dropdown:       0 4px 16px rgba(0,0,0,0.40), 0 0 0 1px rgba(255,255,255,0.09);
+}
+
+/* ── Reset & base ─────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 16px; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: var(--color-bg);
+    color: var(--color-text);
+    min-height: 100dvh;
+    transition: background 0.2s, color 0.2s;
+}
+button { font-family: inherit; cursor: pointer; border: none; background: none; }
+input { font-family: inherit; }
+img { display: block; }
+.hidden { display: none !important; }
+
+/* ── Boutons ──────────────────────────────────────────────────────────────── */
+.btn-primary {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    padding: 14px 20px;
+    background: var(--color-primary);
+    color: #fff;
+    font-size: var(--font-size-md);
+    font-weight: 600;
+    border-radius: var(--radius-btn);
+    transition: opacity 0.15s, transform 0.1s;
+}
+.btn-primary:hover { opacity: 0.88; }
+.btn-primary:active { transform: scale(0.98); }
+.btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-secondary {
+    width: 100%;
+    padding: 12px 20px;
+    border-radius: var(--radius-btn);
+    font-size: var(--font-size-md);
+    font-weight: 600;
+    border: 1.5px solid var(--color-border);
+    color: var(--color-text-secondary);
+    background: var(--color-surface);
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 0.15s;
+}
+.btn-secondary:hover { background: var(--color-surface-2); }
+.btn-secondary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-link {
+    color: var(--color-text-secondary);
+    font-size: var(--font-size-sm);
+    font-weight: 400;
+    padding: 4px 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    opacity: 0.75;
+    width: 100%;
+    text-align: center;
+}
+.btn-link:hover { opacity: 1; }
+
+/* ── Écran Bienvenue / Setup ──────────────────────────────────────────────── */
+.welcome-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100dvh;
+    padding: 32px 24px;
+    max-width: 400px;
+    margin: 0 auto;
+    text-align: center;
+    gap: 12px;
+}
+.welcome-logo { margin-bottom: 8px; }
+.welcome-logo img {
+    border-radius: 20px;
+    box-shadow: 0 10px 30px -8px var(--color-primary-light), var(--shadow-dropdown);
+}
+.setup-title { font-size: var(--font-size-lg); font-weight: 700; margin-bottom: 8px; letter-spacing: -0.3px; text-align: center; }
+.setup-method-desc { font-size: var(--font-size-base); color: var(--color-text-secondary); margin-bottom: 16px; line-height: 1.5; text-align: center; }
+
+.field-label { display: block; font-size: var(--font-size-base); font-weight: 500; color: var(--color-text-secondary); margin-bottom: 6px; }
+.input-wrapper {
+    display: flex;
+    align-items: center;
+    background: var(--color-surface);
+    border: 1.5px solid var(--color-border);
+    border-radius: var(--radius-btn);
+    overflow: hidden;
+    transition: border-color 0.15s;
+}
+.input-wrapper:focus-within { border-color: var(--color-primary); }
+.field-input {
+    flex: 1;
+    padding: 12px 14px;
+    font-size: var(--font-size-base);
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--color-text);
+    min-width: 0;
+}
+.field-input:disabled { color: var(--color-text-disabled); }
+
+.setup-error {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 12px 14px;
+    background: var(--color-error-light);
+    border-radius: var(--radius-btn);
+    color: var(--color-error);
+    font-size: var(--font-size-base);
+    line-height: 1.4;
+}
+
+/* ── Formulaire : groupe arrondi et toggle ────────────────────────────────── */
+.form-group {
+    background: var(--color-surface-2);
+    border-radius: var(--radius-card);
+    overflow: hidden;
+    border: 1px solid var(--color-border);
+}
+.form-group-row {
+    display: flex;
+    align-items: center;
+    padding: 12px 14px;
+    gap: 12px;
+    border-bottom: 1px solid var(--color-border);
+}
+.form-group-row:last-child { border-bottom: none; }
+
+.toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: var(--font-size-base);
+    color: var(--color-text-secondary);
+    cursor: pointer;
     user-select: none;
-  }
-  main { width: 100%; max-width: 340px; }
-  .icon { display: block; margin: 0 auto 12px; color: var(--accent); }
-  h1 { font-size: 20px; margin: 0 0 6px; text-align: center; }
-  p { margin: 0 0 16px; color: var(--muted); text-align: center; }
-  p.left { text-align: left; }
-  form { display: flex; flex-direction: column; gap: 10px; }
-  label { font-size: 13px; color: var(--muted); }
-  label.check { display: flex; gap: 8px; align-items: center; color: var(--text); font-size: 14px; }
-  input[type=password] {
-    width: 100%; padding: 10px 12px; font: inherit; color: var(--text);
-    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-  }
-  input[type=password]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-  button {
-    font: inherit; padding: 10px 12px; border-radius: 8px; cursor: pointer;
-    border: 1px solid var(--border); background: var(--card); color: var(--text);
-  }
-  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
-  button.danger { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 600; }
-  button:disabled { opacity: .6; cursor: default; }
-  button.link { border: none; background: none; color: var(--accent); padding: 4px; font-size: 13px; }
-  .row { display: flex; gap: 8px; }
-  .row > button { flex: 1; }
-  .msg { min-height: 20px; font-size: 13px; text-align: center; color: var(--danger); }
-  .msg.ok { color: var(--ok); }
-  .field { display: flex; flex-direction: column; gap: 4px; }
-  [hidden] { display: none !important; }
+    width: 100%;
+}
+.toggle-track {
+    width: 36px; height: 20px;
+    border-radius: 10px;
+    background: var(--color-checkbox);
+    position: relative;
+    transition: background 0.2s;
+    flex-shrink: 0;
+}
+.toggle-track::after {
+    content: '';
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.2s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.toggle-checkbox:checked + .toggle-track { background: var(--color-primary); }
+.toggle-checkbox:checked + .toggle-track::after { transform: translateX(16px); }
+
+/* ── Propre à l'écran de verrouillage ─────────────────────────────────────── */
+/* Toggle atteignable au clavier (le site le masque en display: none). */
+.toggle-label { position: relative; }
+.toggle-checkbox { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.toggle-checkbox:focus-visible + .toggle-track { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+.toggle-checkbox:disabled + .toggle-track { opacity: 0.4; }
+
+.lock-section { width: 100%; }
+.lock-form { display: flex; flex-direction: column; gap: 12px; width: 100%; text-align: left; }
+.lock-text { font-size: var(--font-size-base); color: var(--color-text-secondary); line-height: 1.5; text-align: left; margin-bottom: 12px; }
+.lock-text strong { color: var(--color-text); }
+.lock-actions { display: flex; gap: 10px; }
+.lock-actions > button { flex: 1; }
+.btn-danger { background: var(--color-error); }
+.setup-success {
+    padding: 12px 14px;
+    background: var(--color-surface-2);
+    border-radius: var(--radius-btn);
+    color: var(--color-success);
+    font-size: var(--font-size-base);
+    line-height: 1.4;
+}
 </style>
 </head>
 <body>
-<main>
-  <svg class="icon" width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-       stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-    <rect x="4" y="10.5" width="16" height="10.5" rx="2.5"/>
-    <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>
-  </svg>
+<div class="welcome-container">
+  <div class="welcome-logo"><img src="logo.png" alt="Ma Journée" width="80" height="80"></div>
 
-  <!-- Deverrouillage -->
-  <section id="unlock" hidden>
-    <h1>Ma Journée est verrouillée</h1>
-    <p id="unlock-hint">Saisissez votre code pour continuer.</p>
-    <form id="unlock-form">
-      <input id="code" type="password" autocomplete="off" aria-label="Code" placeholder="Code">
-      <button class="primary" type="submit">Déverrouiller</button>
-      <button id="hello" type="button" hidden>Utiliser Windows Hello</button>
+  <!-- Déverrouillage -->
+  <section class="lock-section hidden" id="unlock">
+    <h1 class="setup-title">Ma Journée est verrouillée</h1>
+    <p class="setup-method-desc" id="unlock-hint">Saisissez votre code pour continuer.</p>
+    <form class="lock-form" id="unlock-form">
+      <div>
+        <label for="code" class="field-label">Code</label>
+        <div class="input-wrapper">
+          <input id="code" class="field-input" type="password" autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+      <div class="setup-error hidden" id="unlock-error" role="alert"></div>
+      <button class="btn-primary" type="submit">Déverrouiller</button>
+      <button class="btn-secondary hidden" id="hello" type="button">Utiliser Windows Hello</button>
     </form>
-    <div class="msg" id="unlock-msg" role="alert"></div>
-    <p><button class="link" id="forgot" type="button">Code oublié ?</button></p>
+    <button class="btn-link" id="forgot" type="button">Code oublié ?</button>
   </section>
 
-  <!-- Reinitialisation -->
-  <section id="reset" hidden>
-    <h1>Réinitialiser le verrou</h1>
-    <p class="left">Le verrou sera supprimé et vous serez <strong>déconnecté</strong> de Ma Journée sur cet ordinateur :
-      il faudra vous reconnecter.</p>
-    <p class="left">Les modifications faites hors ligne et pas encore synchronisées seront perdues.</p>
-    <div class="row">
-      <button id="reset-cancel" type="button">Annuler</button>
-      <button id="reset-confirm" class="danger" type="button">Réinitialiser</button>
+  <!-- Réinitialisation -->
+  <section class="lock-section hidden" id="reset">
+    <h1 class="setup-title">Réinitialiser le verrou</h1>
+    <p class="lock-text">Le verrou sera supprimé et vous serez <strong>déconnecté de Ma Journée</strong> sur cet ordinateur. Il faudra vous reconnecter.</p>
+    <p class="lock-text">Les modifications faites hors ligne et pas encore synchronisées seront perdues.</p>
+    <div class="lock-form">
+      <div class="setup-error hidden" id="reset-error" role="alert"></div>
+      <div class="lock-actions">
+        <button class="btn-secondary" id="reset-cancel" type="button">Annuler</button>
+        <button class="btn-primary btn-danger" id="reset-confirm" type="button">Réinitialiser</button>
+      </div>
     </div>
-    <div class="msg" id="reset-msg" role="alert"></div>
   </section>
 
-  <!-- Reglages -->
-  <section id="setup" hidden>
-    <h1>Verrouillage</h1>
-    <p>Demande un code à l'ouverture, après la fermeture de la fenêtre et au réveil de l'ordinateur.</p>
-    <form id="setup-form">
-      <label class="check"><input id="enabled" type="checkbox"> Verrouiller Ma Journée</label>
-      <div class="field" id="current-field" hidden>
-        <label for="current">Code actuel</label>
-        <input id="current" type="password" autocomplete="off">
+  <!-- Réglages -->
+  <section class="lock-section hidden" id="setup">
+    <h1 class="setup-title">Verrouillage</h1>
+    <p class="setup-method-desc">Un code est demandé à l'ouverture, après la fermeture de la fenêtre et au réveil de l'ordinateur.</p>
+    <form class="lock-form" id="setup-form">
+      <div class="form-group">
+        <div class="form-group-row">
+          <label class="toggle-label" for="enabled">
+            <input type="checkbox" class="toggle-checkbox" id="enabled">
+            <span class="toggle-track"></span>
+            Verrouiller Ma Journée
+          </label>
+        </div>
+        <div class="form-group-row hidden" id="hello-row">
+          <label class="toggle-label" for="hello-enabled">
+            <input type="checkbox" class="toggle-checkbox" id="hello-enabled">
+            <span class="toggle-track"></span>
+            Autoriser Windows Hello
+          </label>
+        </div>
       </div>
-      <div class="field">
-        <label for="new-code" id="new-label">Code (4 caractères minimum)</label>
-        <input id="new-code" type="password" autocomplete="off">
+      <div class="hidden" id="current-field">
+        <label for="current" class="field-label">Code actuel</label>
+        <div class="input-wrapper"><input id="current" class="field-input" type="password" autocomplete="off" spellcheck="false"></div>
       </div>
-      <div class="field">
-        <label for="confirm">Confirmer le code</label>
-        <input id="confirm" type="password" autocomplete="off">
+      <div>
+        <label for="new-code" class="field-label" id="new-label">Code (4 caractères minimum)</label>
+        <div class="input-wrapper"><input id="new-code" class="field-input" type="password" autocomplete="off" spellcheck="false"></div>
       </div>
-      <label class="check" id="hello-field" hidden><input id="hello-enabled" type="checkbox"> Autoriser Windows Hello</label>
-      <div class="row">
-        <button id="setup-cancel" type="button">Annuler</button>
-        <button class="primary" type="submit">Enregistrer</button>
+      <div>
+        <label for="confirm" class="field-label">Confirmer le code</label>
+        <div class="input-wrapper"><input id="confirm" class="field-input" type="password" autocomplete="off" spellcheck="false"></div>
+      </div>
+      <div class="setup-error hidden" id="setup-error" role="alert"></div>
+      <div class="setup-success hidden" id="setup-success" role="status"></div>
+      <div class="lock-actions">
+        <button class="btn-secondary" id="setup-cancel" type="button">Annuler</button>
+        <button class="btn-primary" type="submit">Enregistrer</button>
       </div>
     </form>
-    <div class="msg" id="setup-msg" role="alert"></div>
   </section>
-</main>
+</div>
 
 <script>
 (function () {
@@ -121,28 +337,60 @@
   var $ = function (id) { return document.getElementById(id); };
   var mode = new URLSearchParams(location.search).get('mode') === 'setup' ? 'setup' : 'unlock';
 
+  // Thème et accent choisis sur le site (copie de ACCENTS dans js/theme-init.js : garder
+  // les deux tables identiques). Valeurs relevées dans la fenêtre principale (set_appearance).
+  var ACCENTS = {
+    amber:   ['#cb4f00', '#f05d00'],
+    crimson: ['#e22e2c', '#e9605e'],
+    rose:    ['#e00c95', '#f541b5'],
+    fuchsia: ['#c820d7', '#d952e5'],
+    violet:  ['#8e53f1', '#a373f4'],
+    indigo:  ['#6c63ec', '#867fef'],
+    blue:    ['#0e6dff', '#3e8aff'],
+    cyan:    ['#1b80a3', '#2098c1'],
+    teal:    ['#0f857c', '#129d93'],
+    green:   ['#078933', '#08a33d'],
+    kiwi:    ['#3c8700', '#47a000'],
+    slate:   ['#475569', '#7d8ea7']
+  };
+  function applyAppearance(setting, accentKey) {
+    var t = (setting === 'light' || setting === 'dark') ? setting
+      : (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-theme', t);
+    var accent = ACCENTS[accentKey] || ACCENTS.amber;
+    var primary = accent[0];
+    var r = parseInt(primary.slice(1, 3), 16);
+    var g = parseInt(primary.slice(3, 5), 16);
+    var b = parseInt(primary.slice(5, 7), 16);
+    var root = document.documentElement.style;
+    root.setProperty('--color-primary', primary);
+    root.setProperty('--color-primary-light', 'rgba(' + r + ',' + g + ',' + b + ',0.13)');
+    root.setProperty('--color-primary-text', t === 'dark' ? accent[1] : primary);
+  }
+  applyAppearance('system', 'amber');
+
   function closeWindow() { window.__TAURI__.window.getCurrentWindow().close(); }
   function show(id) {
-    ['unlock', 'reset', 'setup'].forEach(function (s) { $(s).hidden = s !== id; });
+    ['unlock', 'reset', 'setup'].forEach(function (s) { $(s).classList.toggle('hidden', s !== id); });
   }
-  function message(id, text, ok) {
+  function message(id, text) {
     $(id).textContent = text || '';
-    $(id).classList.toggle('ok', !!ok);
+    $(id).classList.toggle('hidden', !text);
   }
   function errorText(e) { return typeof e === 'string' ? e : 'Une erreur est survenue.'; }
 
-  // ── Deverrouillage ────────────────────────────────────────────────────────
+  // ── Déverrouillage ────────────────────────────────────────────────────────
   function startUnlock(status) {
     show('unlock');
     if (status.unreadable) {
-      $('unlock-form').hidden = true;
+      $('unlock-form').classList.add('hidden');
       $('unlock-hint').textContent = 'Les réglages du verrou sont illisibles. Réinitialisez le verrou pour continuer.';
       return;
     }
     var helloReady = status.hello_enabled && status.hello_available;
-    $('hello').hidden = !helloReady;
+    $('hello').classList.toggle('hidden', !helloReady);
     if (status.retry_in_secs > 0) {
-      message('unlock-msg', "Trop d'essais. Réessayez dans " + status.retry_in_secs + ' s.');
+      message('unlock-error', "Trop d'essais. Réessayez dans " + status.retry_in_secs + ' s.');
     }
     $('code').focus();
     if (helloReady) tryHello();
@@ -151,7 +399,7 @@
   function tryHello() {
     $('hello').disabled = true;
     invoke('lock_unlock_with_hello')
-      .catch(function (e) { message('unlock-msg', errorText(e)); $('code').focus(); })
+      .catch(function (e) { message('unlock-error', errorText(e)); $('code').focus(); })
       .finally(function () { $('hello').disabled = false; });
   }
 
@@ -161,19 +409,19 @@
     if (!code) return;
     var button = ev.target.querySelector('button[type=submit]');
     button.disabled = true;
-    message('unlock-msg', '');
+    message('unlock-error', '');
     invoke('lock_unlock_with_code', { code: code })
       .catch(function (e) {
-        message('unlock-msg', errorText(e));
+        message('unlock-error', errorText(e));
         $('code').value = '';
         $('code').focus();
       })
       .finally(function () { button.disabled = false; });
   });
   $('hello').addEventListener('click', tryHello);
-  $('forgot').addEventListener('click', function () { message('reset-msg', ''); show('reset'); });
+  $('forgot').addEventListener('click', function () { message('reset-error', ''); show('reset'); });
 
-  // ── Reinitialisation ──────────────────────────────────────────────────────
+  // ── Réinitialisation ──────────────────────────────────────────────────────
   $('reset-cancel').addEventListener('click', function () {
     show('unlock');
     $('code').focus();
@@ -181,17 +429,17 @@
   $('reset-confirm').addEventListener('click', function () {
     $('reset-confirm').disabled = true;
     invoke('lock_reset')
-      .catch(function (e) { message('reset-msg', errorText(e)); })
+      .catch(function (e) { message('reset-error', errorText(e)); })
       .finally(function () { $('reset-confirm').disabled = false; });
   });
 
-  // ── Reglages ──────────────────────────────────────────────────────────────
+  // ── Réglages ──────────────────────────────────────────────────────────────
   function startSetup(status) {
     show('setup');
     $('enabled').checked = status.enabled;
-    $('current-field').hidden = !status.enabled;
-    if (status.enabled) $('new-label').textContent = 'Nouveau code (laisser vide pour garder le code actuel)';
-    $('hello-field').hidden = !status.hello_available;
+    $('current-field').classList.toggle('hidden', !status.enabled);
+    if (status.enabled) $('new-label').textContent = 'Nouveau code (vide pour garder le code actuel)';
+    $('hello-row').classList.toggle('hidden', !status.hello_available);
     $('hello-enabled').checked = status.hello_enabled;
     updateSetupFields();
     (status.enabled ? $('current') : $('enabled')).focus();
@@ -202,17 +450,18 @@
       ev.preventDefault();
       var enabled = $('enabled').checked;
       var newCode = $('new-code').value;
+      message('setup-success', '');
       if (enabled && newCode !== $('confirm').value) {
-        message('setup-msg', 'Les deux codes ne correspondent pas.');
+        message('setup-error', 'Les deux codes ne correspondent pas.');
         return;
       }
       if (enabled && !status.enabled && !newCode) {
-        message('setup-msg', 'Choisissez un code.');
+        message('setup-error', 'Choisissez un code.');
         return;
       }
       var button = ev.target.querySelector('button[type=submit]');
       button.disabled = true;
-      message('setup-msg', '');
+      message('setup-error', '');
       invoke('lock_configure', {
         settings: {
           enabled: enabled,
@@ -222,11 +471,11 @@
         }
       })
         .then(function () {
-          message('setup-msg', enabled ? 'Verrouillage activé.' : 'Verrouillage désactivé.', true);
+          message('setup-success', enabled ? 'Verrouillage activé.' : 'Verrouillage désactivé.');
           setTimeout(closeWindow, 900);
         })
         .catch(function (e) {
-          message('setup-msg', errorText(e));
+          message('setup-error', errorText(e));
           button.disabled = false;
         });
     });
@@ -238,7 +487,8 @@
   }
 
   invoke('lock_status').then(function (status) {
-    // Verrouillee entre-temps (veille...) : jamais de reglages sans deverrouillage.
+    applyAppearance(status.theme, status.accent);
+    // Verrouillée entre-temps (veille...) : jamais de réglages sans déverrouillage.
     if (mode === 'setup' && !status.locked) startSetup(status);
     else startUnlock(status);
   });

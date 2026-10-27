@@ -49,3 +49,21 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+
+  # Un seul OS suffit : Cargo.lock liste deja les dependances de toutes les plateformes.
+  audit:
+    name: Audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Audit
+        run: cargo audit

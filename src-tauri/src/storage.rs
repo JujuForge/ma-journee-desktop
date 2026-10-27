@@ -14,6 +14,8 @@ use serde::{Serialize, de::DeserializeOwned};
 pub enum LoadResult<T> {
     Missing,
     Loaded(T),
+    /// Inutilisable pour cette session : contenu invalide (mis de cote en `.corrupt`) ou
+    /// lecture impossible (fichier laisse en place, voir `load_json`).
     Corrupt,
 }
 
@@ -59,16 +61,22 @@ fn quarantine(path: &Path) {
     }
 }
 
-/// Lit et decode un fichier JSON. Un fichier absent n'est pas une erreur ; un fichier illisible
-/// ou invalide est journalise (position seulement, jamais le contenu : il peut contenir des
-/// donnees utilisateur) et mis de cote.
+/// Lit et decode un fichier JSON. Un fichier absent n'est pas une erreur ; un contenu invalide
+/// est journalise (position seulement, jamais le contenu : il peut contenir des donnees
+/// utilisateur) et mis de cote. Une lecture impossible (droits, verrou d'antivirus...) laisse le
+/// fichier en place : son contenu est peut-etre valide et sera relu au prochain lancement.
 pub fn load_json<T: DeserializeOwned>(path: &Path) -> LoadResult<T> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return LoadResult::Missing,
-        Err(e) => {
-            log::error!("Lecture impossible de {}: {}", path.display(), e);
+        // Contenu non UTF-8 : le fichier lui-meme est en cause.
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            log::error!("Contenu illisible dans {}: {}", path.display(), e);
             quarantine(path);
+            return LoadResult::Corrupt;
+        }
+        Err(e) => {
+            log::error!("Lecture impossible de {} (fichier conserve tel quel): {}", path.display(), e);
             return LoadResult::Corrupt;
         }
     };
@@ -185,6 +193,27 @@ mod tests {
         fs::write(&path, r#"{"name":"a","count":"pas un nombre"}"#).unwrap();
         assert!(matches!(load_json::<Sample>(&path), LoadResult::Corrupt));
         assert!(sibling(&path, ".corrupt").exists());
+    }
+
+    #[test]
+    fn load_non_utf8_file_is_quarantined() {
+        let tmp = TempDir::new("non-utf8");
+        let path = tmp.0.join("data.json");
+        fs::write(&path, [0xff, 0xfe, 0x00]).unwrap();
+        assert!(matches!(load_json::<Sample>(&path), LoadResult::Corrupt));
+        assert!(!path.exists());
+        assert!(sibling(&path, ".corrupt").exists());
+    }
+
+    #[test]
+    fn unreadable_path_is_left_in_place() {
+        // Un dossier a la place du fichier : la lecture echoue sans que le contenu soit en cause.
+        let tmp = TempDir::new("unreadable");
+        let path = tmp.0.join("data.json");
+        fs::create_dir(&path).unwrap();
+        assert!(matches!(load_json::<Sample>(&path), LoadResult::Corrupt));
+        assert!(path.is_dir());
+        assert!(!sibling(&path, ".corrupt").exists());
     }
 
     #[test]

@@ -14,7 +14,10 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-notification = "2"
-tauri-plugin-updater = "2"
+# Sans la feature `zip` (defaut) : les artefacts de mise a jour v2 (`createUpdaterArtifacts: true`)
+# sont des binaires bruts (.exe NSIS, AppImage non compressee), jamais des archives. Evite aussi
+# zip 4.x et ses failles d'extraction (RUSTSEC-2026-0367/0368/0369).
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-log = "2"

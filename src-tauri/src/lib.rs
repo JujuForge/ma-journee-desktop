@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -84,15 +87,50 @@ fn set_update_notif_enabled(
     enabled: bool,
 ) -> Result<(), String> {
     let mut settings = state.lock().unwrap();
-    settings.update_notif_enabled = enabled;
-    save_app_settings(&app, &settings);
+    let updated = DesktopAppSettings { update_notif_enabled: enabled, ..settings.clone() };
+    save_app_settings(&app, &updated).inspect_err(|e| {
+        log::error!("Echec sauvegarde des reglages de l'app : {}", e);
+    })?;
+    *settings = updated;
     log::info!("Notification de mise a jour {}", if enabled { "activee" } else { "desactivee" });
     Ok(())
+}
+
+/// Empeche deux installations simultanees (ex: double clic sur "Installer").
+static UPDATE_INSTALLING: AtomicBool = AtomicBool::new(false);
+
+/// Libere `UPDATE_INSTALLING` si l'installation echoue (sortie anticipee par `?`).
+struct UpdateInstallGuard;
+
+impl Drop for UpdateInstallGuard {
+    fn drop(&mut self) {
+        UPDATE_INSTALLING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Palier de progression du telechargement : le pourcentage si la taille totale est connue,
+/// sinon le nombre de Mo recus. Un evenement n'est emis qu'a chaque changement de palier.
+fn progress_step(downloaded: u64, total: Option<u64>) -> u64 {
+    match total {
+        Some(total) if total > 0 => downloaded.min(total) * 100 / total,
+        _ => downloaded / 1_000_000,
+    }
+}
+
+#[derive(Clone, serde::Serialize)]
+struct UpdateDownloadProgress {
+    downloaded: u64,
+    total: Option<u64>,
 }
 
 #[tauri::command]
 async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_updater::UpdaterExt;
+    if UPDATE_INSTALLING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        log::warn!("Installation de mise a jour deja en cours, demande ignoree");
+        return Err("Installation deja en cours".to_string());
+    }
+    let _guard = UpdateInstallGuard;
     let update = app
         .updater()
         .map_err(|e| e.to_string())?
@@ -104,10 +142,31 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
         })?
         .ok_or_else(|| "Aucune mise a jour disponible".to_string())?;
     log::info!("Installation de la mise a jour v{}", update.version);
-    update.download_and_install(|_, _| {}, || {}).await.map_err(|e| {
-        log::error!("Echec telechargement/installation: {}", e);
-        e.to_string()
-    })?;
+    // Progression relayee au frontend (evenement "update-download-progress"), comme "native-menu".
+    let downloaded = AtomicU64::new(0);
+    let total = Mutex::new(None);
+    let last_step = AtomicU64::new(u64::MAX);
+    let emit_progress = |downloaded, total| {
+        let _ = app.emit("update-download-progress", UpdateDownloadProgress { downloaded, total });
+    };
+    update
+        .download_and_install(
+            |chunk, content_length| {
+                let now = downloaded.fetch_add(chunk as u64, Ordering::Relaxed) + chunk as u64;
+                *total.lock().unwrap() = content_length;
+                let step = progress_step(now, content_length);
+                if last_step.swap(step, Ordering::Relaxed) != step {
+                    emit_progress(now, content_length);
+                }
+            },
+            // Dernier evenement, utile surtout quand la taille totale est inconnue.
+            || emit_progress(downloaded.load(Ordering::Relaxed), *total.lock().unwrap()),
+        )
+        .await
+        .map_err(|e| {
+            log::error!("Echec telechargement/installation: {}", e);
+            e.to_string()
+        })?;
     app.restart();
 }
 
@@ -223,12 +282,9 @@ fn config_file(app: &tauri::AppHandle, name: &str) -> Option<PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join(name))
 }
 
-fn save_app_settings(app: &tauri::AppHandle, settings: &DesktopAppSettings) {
-    if let Some(path) = config_file(app, APP_SETTINGS_FILE)
-        && let Err(e) = storage::save_json(&path, settings)
-    {
-        log::warn!("Echec sauvegarde des reglages de l'app : {}", e);
-    }
+fn save_app_settings(app: &tauri::AppHandle, settings: &DesktopAppSettings) -> Result<(), String> {
+    let path = config_file(app, APP_SETTINGS_FILE).ok_or("dossier de configuration introuvable")?;
+    storage::save_json(&path, settings)
 }
 
 fn load_app_settings(app: &tauri::AppHandle) -> DesktopAppSettings {
@@ -600,7 +656,8 @@ fn send_notification(app: &tauri::AppHandle, title: &str, body: &str) {
                 });
             });
         }
-        Err(e) => log::error!("Echec envoi notification '{}': {}", title, e),
+        // Titre non journalise : c'est du contenu utilisateur (notifications personnalisees).
+        Err(e) => log::error!("Echec envoi notification : {}", e),
     }
 }
 
@@ -896,12 +953,18 @@ pub fn run() {
                     let mut settings = close_app_settings.lock().unwrap();
                     if !settings.tray_hint_shown {
                         settings.tray_hint_shown = true;
-                        save_app_settings(&close_app_handle, &settings);
-                        send_notification(
-                            &close_app_handle,
-                            "Ma Journée continue en arrière-plan",
-                            "Fermer la fenêtre ne quitte pas l'application : elle reste active dans la zone de notification, un clic sur son icône la rouvre.",
-                        );
+                        if let Err(e) = save_app_settings(&close_app_handle, &settings) {
+                            log::warn!("Echec sauvegarde des reglages de l'app : {}", e);
+                        }
+                        // Sous Linux (libayatana), le clic sur l'icone ouvre le menu au lieu de la
+                        // fenetre, et sans extension de tray (GNOME) l'icone n'apparait pas du tout :
+                        // relancer l'app rouvre alors la fenetre (single-instance).
+                        let body = if cfg!(target_os = "linux") {
+                            "Fermer la fenêtre ne quitte pas l'application : elle reste active en arrière-plan. Pour la rouvrir, utilisez « Ouvrir Ma Journée » dans le menu de son icône, ou relancez l'application."
+                        } else {
+                            "Fermer la fenêtre ne quitte pas l'application : elle reste active dans la zone de notification, un clic sur son icône la rouvre."
+                        };
+                        send_notification(&close_app_handle, "Ma Journée continue en arrière-plan", body);
                     }
                 }
             });
@@ -1376,6 +1439,23 @@ mod tests {
         let mut last_fired = HashMap::from([("gone".to_string(), at(2026, 8, 24, 8, 0, 0))]);
         due_notifications(&[base_notif()], &[], &mut last_fired);
         assert!(last_fired.is_empty());
+    }
+
+    // ── progress_step() ───────────────────────────────────────────────────────
+
+    #[test]
+    fn progress_step_is_a_percentage_when_total_is_known() {
+        assert_eq!(progress_step(0, Some(200)), 0);
+        assert_eq!(progress_step(99, Some(200)), 49);
+        assert_eq!(progress_step(200, Some(200)), 100);
+        assert_eq!(progress_step(250, Some(200)), 100); // borne a 100 %
+    }
+
+    #[test]
+    fn progress_step_counts_megabytes_when_total_is_unknown() {
+        assert_eq!(progress_step(999_999, None), 0);
+        assert_eq!(progress_step(2_500_000, None), 2);
+        assert_eq!(progress_step(2_500_000, Some(0)), 2);
     }
 
     // ── next_update_check_delay() ─────────────────────────────────────────────

@@ -660,14 +660,9 @@ fn start_notification_loop(notifications: SharedNotifications, app: tauri::AppHa
 /// affiche l'ecran de verrouillage a la place.
 fn show_and_focus_main_window(app: &tauri::AppHandle) {
     if lock::is_locked(app) {
-        lock::show_locked(app);
-    } else {
-        focus_main_window(app);
+        lock::show_window(app, lock::Mode::Unlock);
+        return;
     }
-}
-
-/// Affiche la fenetre principale sans tenir compte du verrou (voir `lock::show_locked`).
-fn focus_main_window(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.set_focus();
@@ -990,11 +985,6 @@ pub fn run() {
                     if(a.target==='_blank'||a.protocol==='mailto:'){e.preventDefault();openExt(a.href);}
                 },true);
             })();"#)
-            .on_page_load(|w, payload| {
-                if payload.event() == tauri::webview::PageLoadEvent::Started {
-                    lock::on_main_page_started(w.app_handle());
-                }
-            })
             .initialization_script(format!("document.addEventListener('DOMContentLoaded',function(){{{REPORT_APPEARANCE_JS}}});"))
             .on_navigation(move |url| match navigation_action(url, frontend_host) {
                 NavigationAction::Stay => true,
@@ -1112,8 +1102,7 @@ pub fn run() {
             get_update_notif_enabled, set_update_notif_enabled, set_appearance,
             notify, open_log_folder, update_tray_status,
             lock::lock_status, lock::lock_unlock_with_code, lock::lock_unlock_with_hello,
-            lock::lock_configure, lock::lock_reset, lock::open_lock_settings,
-            lock::lock_web_register, lock::lock_screen_ready
+            lock::lock_configure, lock::lock_reset, lock::open_lock_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

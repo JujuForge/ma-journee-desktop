@@ -35,11 +35,9 @@ cargo audit   # cargo install cargo-audit
 
 ## Verrouillage
 
-Menu **Fichier > Verrouillage…** : un code (et Windows Hello sous Windows) est demandé au démarrage, après la fermeture de la fenêtre et au réveil de l'ordinateur. Le contenu des notifications est masqué tant que l'app est verrouillée. En cas d'oubli, « Code oublié ? » supprime le verrou et déconnecte le compte sur cet ordinateur.
+**Fichier > Verrouillage…** : un code (ou Windows Hello) est demandé au démarrage, à la réouverture de la fenêtre et au réveil de l'ordinateur ; les notifications sont masquées entre-temps. « Code oublié ? » supprime le verrou et déconnecte le compte sur cet ordinateur.
 
-L'écran de verrouillage est affiché par majournee.com. L'app de bureau garde l'état, les déclencheurs et la vérification du code (`src-tauri/src/lock.rs`), et ouvre une page locale de secours si le site ne répond pas.
-
-C'est un écran de confidentialité, pas un chiffrement : il empêche d'utiliser la session ouverte, mais une personne connectée au même compte Windows ou Linux peut toujours supprimer le verrou ou lire les fichiers de l'app. Sur un ordinateur partagé, la vraie séparation reste un compte Windows ou Linux par personne.
+Cela protège la session ouverte, pas les fichiers : une personne utilisant le même compte Windows ou Linux peut contourner le verrou. Sur un ordinateur partagé, prévoir un compte par personne.
 
 ## Licence
 

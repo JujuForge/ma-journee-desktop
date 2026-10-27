@@ -33,6 +33,12 @@ cargo fmt --check && cargo test --locked && cargo clippy --all-targets --locked 
 cargo audit   # cargo install cargo-audit
 ```
 
+## Verrouillage
+
+Menu **Fichier > Verrouillage…** : un code (et Windows Hello sous Windows) est demandé au démarrage, après la fermeture de la fenêtre et au réveil de l'ordinateur. Le contenu des notifications est masqué tant que l'app est verrouillée. En cas d'oubli, « Code oublié ? » supprime le verrou et déconnecte le compte sur cet ordinateur.
+
+C'est un écran de confidentialité, pas un chiffrement : il protège la session ouverte, pas les fichiers du compte système. Sur un ordinateur partagé, des comptes système distincts restent la vraie séparation.
+
 ## Licence
 
 MIT, voir [LICENSE](LICENSE). Les versions officielles sont publiées par le mainteneur.

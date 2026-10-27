@@ -14,6 +14,7 @@ use tauri::{
     tray::TrayIconBuilder,
 };
 
+mod lock;
 mod storage;
 use storage::LoadResult;
 
@@ -66,8 +67,8 @@ type SharedAppSettings = Arc<Mutex<DesktopAppSettings>>;
 struct TrayStatusItem(MenuItem<tauri::Wry>);
 
 #[tauri::command]
-fn update_tray_status(state: tauri::State<'_, TrayStatusItem>, text: String) -> Result<(), String> {
-    state.0.set_text(text).map_err(|e| e.to_string())
+fn update_tray_status(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    lock::set_tray_status(&app, text)
 }
 
 #[tauri::command]
@@ -603,8 +604,13 @@ fn start_notification_loop(notifications: SharedNotifications, app: tauri::AppHa
 }
 
 /// Reaffiche et donne le focus a la fenetre principale (utilise par le tray, le
-/// second lancement en single-instance, et le clic sur une notification).
+/// second lancement en single-instance, et le clic sur une notification). App verrouillee :
+/// affiche l'ecran de verrouillage a la place.
 fn show_and_focus_main_window(app: &tauri::AppHandle) {
+    if lock::is_locked(app) {
+        lock::show_window(app, lock::Mode::Unlock);
+        return;
+    }
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.set_focus();
@@ -617,6 +623,7 @@ fn show_and_focus_main_window(app: &tauri::AppHandle) {
 /// reafficher et mettre au premier plan la fenetre principale au clic, quelle que soit
 /// la notification (mise a jour, mail UCA, changement de planning...).
 fn send_notification(app: &tauri::AppHandle, title: &str, body: &str) {
+    let (title, body) = lock::mask_notification(app, title, body);
     let mut notification = notify_rust::Notification::new();
     notification.summary(title);
     notification.body(body);
@@ -767,6 +774,15 @@ fn disable_gtk_global_appmenu() {
     }
 }
 
+/// Site charge dans la fenetre principale (hote, URL). En debug (cargo run / tauri dev), le
+/// serveur local demarre par beforeDevCommand (tauri.conf.json) plutot que la prod : sans ce
+/// branchement, la fenetre chargeait toujours https://majournee.com meme en dev, rendant
+/// devUrl/beforeDevCommand inoperants malgre une config par ailleurs correcte.
+#[cfg(debug_assertions)]
+const FRONTEND: (&str, &str) = ("localhost", "http://localhost:1420");
+#[cfg(not(debug_assertions))]
+const FRONTEND: (&str, &str) = ("majournee.com", "https://majournee.com");
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
@@ -812,6 +828,8 @@ pub fn run() {
                 )
                 .build(),
         )
+        // Page locale de l'ecran de verrouillage (fonctionne hors ligne, voir lock.rs)
+        .register_uri_scheme_protocol(lock::PROTOCOL, |_ctx, request| lock::serve_page(&request))
         .manage(notifications.clone())
         .manage(pending_update.clone())
         .manage(app_settings.clone())
@@ -829,6 +847,9 @@ pub fn run() {
             let saved_settings = load_app_settings(app.handle());
             *app_settings.lock().unwrap() = saved_settings;
 
+            // Verrouillage : l'app demarre verrouillee si le verrou est actif
+            app.manage(lock::load(app.handle()));
+
             // Vide le cache WebKit si la version du binaire a change
             clear_webview_cache_if_updated(app.handle());
 
@@ -836,15 +857,7 @@ pub fn run() {
             let start_hidden = std::env::args().any(|a| a == "--hidden");
 
             // Creation de la fenetre avec interception de navigation.
-            // En debug (cargo run / tauri dev), charge le serveur local demarre par
-            // beforeDevCommand (tauri.conf.json) plutot que la prod : sans ce branchement,
-            // la fenetre chargeait toujours https://majournee.com meme en dev, rendant
-            // devUrl/beforeDevCommand inoperants malgre une config par ailleurs correcte.
-            let (frontend_host, frontend_url) = if cfg!(debug_assertions) {
-                ("localhost", "http://localhost:1420")
-            } else {
-                ("majournee.com", "https://majournee.com")
-            };
+            let (frontend_host, frontend_url) = FRONTEND;
 
             // Barre de menu native (Fichier / Affichage). Les accelerateurs utilisent tous
             // au moins un modificateur (Ctrl/Cmd) : contrairement aux raccourcis lettre-seule
@@ -855,9 +868,12 @@ pub fn run() {
                 let new_task     = MenuItem::with_id(app, "newTask", "Nouvelle tâche", true, Some("CmdOrCtrl+N"))?;
                 let new_note     = MenuItem::with_id(app, "newNote", "Nouvelle note", true, Some("CmdOrCtrl+Shift+N"))?;
                 let new_deadline = MenuItem::with_id(app, "newDeadline", "Nouvelle échéance", true, Some("CmdOrCtrl+D"))?;
+                let lock_settings = MenuItem::with_id(app, "menu-lock", "Verrouillage…", true, None::<&str>)?;
                 let quit         = MenuItem::with_id(app, "menu-quit", "Quitter", true, Some("CmdOrCtrl+Q"))?;
                 let file_menu = Submenu::with_items(app, "Fichier", true, &[
                     &new_task, &new_note, &new_deadline,
+                    &PredefinedMenuItem::separator(app)?,
+                    &lock_settings,
                     &PredefinedMenuItem::separator(app)?,
                     &quit,
                 ])?;
@@ -878,14 +894,18 @@ pub fn run() {
                 Menu::with_items(app, &[&file_menu, &view_menu])?
             };
 
-            // "menu-quit" est traite directement ici (symetrique au "quit" du tray, sans
-            // aller-retour JS) ; tout autre id est relaye au frontend qui reutilise les
-            // memes handlers que les raccourcis clavier web (buildShortcutHandlers()).
+            // "menu-quit" et "menu-lock" sont traites directement ici (sans aller-retour JS) ;
+            // tout autre id est relaye au frontend qui reutilise les memes handlers que les
+            // raccourcis clavier web (buildShortcutHandlers()).
             app.on_menu_event(|app, event| {
                 let id = event.id.as_ref();
                 if id == "menu-quit" {
                     log::info!("Fermeture demandee via le menu Fichier");
                     app.exit(0);
+                    return;
+                }
+                if id == "menu-lock" {
+                    lock::open_settings(app);
                     return;
                 }
                 let _ = app.emit("native-menu", id.to_string());
@@ -928,7 +948,7 @@ pub fn run() {
             .build()?;
 
             if !start_hidden {
-                let _ = win.show();
+                show_and_focus_main_window(app.handle());
             }
 
             // Linux : le relay mcp.majournee.com est desormais un sous-domaine de majournee.com
@@ -966,6 +986,8 @@ pub fn run() {
                         };
                         send_notification(&close_app_handle, "Ma Journée continue en arrière-plan", body);
                     }
+                    // Apres l'astuce ci-dessus, qui ne doit pas etre masquee.
+                    lock::lock_now(&close_app_handle);
                 }
             });
 
@@ -1015,6 +1037,9 @@ pub fn run() {
             // (l'app reste residente dans le tray, une session peut durer des jours sans redemarrage)
             start_update_check_loop(app.handle().clone(), pending_update.clone(), app_settings.clone());
 
+            // Verrouillage au reveil apres une mise en veille
+            lock::start_sleep_watchdog(app.handle().clone());
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1022,7 +1047,9 @@ pub fn run() {
             get_pending_update, check_for_update_now, install_update, get_platform, get_app_version,
             get_autostart, set_autostart, open_url,
             get_update_notif_enabled, set_update_notif_enabled,
-            notify, open_log_folder, update_tray_status
+            notify, open_log_folder, update_tray_status,
+            lock::lock_status, lock::lock_unlock_with_code, lock::lock_unlock_with_hello,
+            lock::lock_configure, lock::lock_reset, lock::open_lock_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "lock",
+  "description": "Ecran de verrouillage (page locale servie par le protocole lockscreen)",
+  "windows": ["lock"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close"
+  ]
+}

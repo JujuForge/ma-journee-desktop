@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ma Journée</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d2330; --muted: #5d6676; --border: #d5dae2;
+    --accent: #3b6fd8; --accent-text: #ffffff; --danger: #c43d3d; --ok: #2f8a4c;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16191f; --card: #1f232b; --text: #e7eaf0; --muted: #9aa3b2; --border: #353b46;
+      --accent: #6d97ee; --accent-text: #0f1420; --danger: #ec6b6b; --ok: #5fc27f;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Ubuntu, Cantarell, sans-serif;
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+    user-select: none;
+  }
+  main { width: 100%; max-width: 340px; }
+  .icon { display: block; margin: 0 auto 12px; color: var(--accent); }
+  h1 { font-size: 20px; margin: 0 0 6px; text-align: center; }
+  p { margin: 0 0 16px; color: var(--muted); text-align: center; }
+  p.left { text-align: left; }
+  form { display: flex; flex-direction: column; gap: 10px; }
+  label { font-size: 13px; color: var(--muted); }
+  label.check { display: flex; gap: 8px; align-items: center; color: var(--text); font-size: 14px; }
+  input[type=password] {
+    width: 100%; padding: 10px 12px; font: inherit; color: var(--text);
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  }
+  input[type=password]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button {
+    font: inherit; padding: 10px 12px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--card); color: var(--text);
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button.danger { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .6; cursor: default; }
+  button.link { border: none; background: none; color: var(--accent); padding: 4px; font-size: 13px; }
+  .row { display: flex; gap: 8px; }
+  .row > button { flex: 1; }
+  .msg { min-height: 20px; font-size: 13px; text-align: center; color: var(--danger); }
+  .msg.ok { color: var(--ok); }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <svg class="icon" width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="4" y="10.5" width="16" height="10.5" rx="2.5"/>
+    <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>
+  </svg>
+
+  <!-- Deverrouillage -->
+  <section id="unlock" hidden>
+    <h1>Ma Journée est verrouillée</h1>
+    <p id="unlock-hint">Saisissez votre code pour continuer.</p>
+    <form id="unlock-form">
+      <input id="code" type="password" autocomplete="off" aria-label="Code" placeholder="Code">
+      <button class="primary" type="submit">Déverrouiller</button>
+      <button id="hello" type="button" hidden>Utiliser Windows Hello</button>
+    </form>
+    <div class="msg" id="unlock-msg" role="alert"></div>
+    <p><button class="link" id="forgot" type="button">Code oublié ?</button></p>
+  </section>
+
+  <!-- Reinitialisation -->
+  <section id="reset" hidden>
+    <h1>Réinitialiser le verrou</h1>
+    <p class="left">Le verrou sera supprimé et vous serez <strong>déconnecté</strong> de Ma Journée sur cet ordinateur :
+      il faudra vous reconnecter.</p>
+    <p class="left">Les modifications faites hors ligne et pas encore synchronisées seront perdues.</p>
+    <div class="row">
+      <button id="reset-cancel" type="button">Annuler</button>
+      <button id="reset-confirm" class="danger" type="button">Réinitialiser</button>
+    </div>
+    <div class="msg" id="reset-msg" role="alert"></div>
+  </section>
+
+  <!-- Reglages -->
+  <section id="setup" hidden>
+    <h1>Verrouillage</h1>
+    <p>Demande un code à l'ouverture, après la fermeture de la fenêtre et au réveil de l'ordinateur.</p>
+    <form id="setup-form">
+      <label class="check"><input id="enabled" type="checkbox"> Verrouiller Ma Journée</label>
+      <div class="field" id="current-field" hidden>
+        <label for="current">Code actuel</label>
+        <input id="current" type="password" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="new-code" id="new-label">Code (4 caractères minimum)</label>
+        <input id="new-code" type="password" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="confirm">Confirmer le code</label>
+        <input id="confirm" type="password" autocomplete="off">
+      </div>
+      <label class="check" id="hello-field" hidden><input id="hello-enabled" type="checkbox"> Autoriser Windows Hello</label>
+      <div class="row">
+        <button id="setup-cancel" type="button">Annuler</button>
+        <button class="primary" type="submit">Enregistrer</button>
+      </div>
+    </form>
+    <div class="msg" id="setup-msg" role="alert"></div>
+  </section>
+</main>
+
+<script>
+(function () {
+  var invoke = window.__TAURI__.core.invoke;
+  var $ = function (id) { return document.getElementById(id); };
+  var mode = new URLSearchParams(location.search).get('mode') === 'setup' ? 'setup' : 'unlock';
+
+  function closeWindow() { window.__TAURI__.window.getCurrentWindow().close(); }
+  function show(id) {
+    ['unlock', 'reset', 'setup'].forEach(function (s) { $(s).hidden = s !== id; });
+  }
+  function message(id, text, ok) {
+    $(id).textContent = text || '';
+    $(id).classList.toggle('ok', !!ok);
+  }
+  function errorText(e) { return typeof e === 'string' ? e : 'Une erreur est survenue.'; }
+
+  // ── Deverrouillage ────────────────────────────────────────────────────────
+  function startUnlock(status) {
+    show('unlock');
+    if (status.unreadable) {
+      $('unlock-form').hidden = true;
+      $('unlock-hint').textContent = 'Les réglages du verrou sont illisibles. Réinitialisez le verrou pour continuer.';
+      return;
+    }
+    var helloReady = status.hello_enabled && status.hello_available;
+    $('hello').hidden = !helloReady;
+    if (status.retry_in_secs > 0) {
+      message('unlock-msg', "Trop d'essais. Réessayez dans " + status.retry_in_secs + ' s.');
+    }
+    $('code').focus();
+    if (helloReady) tryHello();
+  }
+
+  function tryHello() {
+    $('hello').disabled = true;
+    invoke('lock_unlock_with_hello')
+      .catch(function (e) { message('unlock-msg', errorText(e)); $('code').focus(); })
+      .finally(function () { $('hello').disabled = false; });
+  }
+
+  $('unlock-form').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var code = $('code').value;
+    if (!code) return;
+    var button = ev.target.querySelector('button[type=submit]');
+    button.disabled = true;
+    message('unlock-msg', '');
+    invoke('lock_unlock_with_code', { code: code })
+      .catch(function (e) {
+        message('unlock-msg', errorText(e));
+        $('code').value = '';
+        $('code').focus();
+      })
+      .finally(function () { button.disabled = false; });
+  });
+  $('hello').addEventListener('click', tryHello);
+  $('forgot').addEventListener('click', function () { message('reset-msg', ''); show('reset'); });
+
+  // ── Reinitialisation ──────────────────────────────────────────────────────
+  $('reset-cancel').addEventListener('click', function () {
+    show('unlock');
+    $('code').focus();
+  });
+  $('reset-confirm').addEventListener('click', function () {
+    $('reset-confirm').disabled = true;
+    invoke('lock_reset')
+      .catch(function (e) { message('reset-msg', errorText(e)); })
+      .finally(function () { $('reset-confirm').disabled = false; });
+  });
+
+  // ── Reglages ──────────────────────────────────────────────────────────────
+  function startSetup(status) {
+    show('setup');
+    $('enabled').checked = status.enabled;
+    $('current-field').hidden = !status.enabled;
+    if (status.enabled) $('new-label').textContent = 'Nouveau code (laisser vide pour garder le code actuel)';
+    $('hello-field').hidden = !status.hello_available;
+    $('hello-enabled').checked = status.hello_enabled;
+    updateSetupFields();
+    (status.enabled ? $('current') : $('enabled')).focus();
+
+    $('enabled').addEventListener('change', updateSetupFields);
+    $('setup-cancel').addEventListener('click', closeWindow);
+    $('setup-form').addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var enabled = $('enabled').checked;
+      var newCode = $('new-code').value;
+      if (enabled && newCode !== $('confirm').value) {
+        message('setup-msg', 'Les deux codes ne correspondent pas.');
+        return;
+      }
+      if (enabled && !status.enabled && !newCode) {
+        message('setup-msg', 'Choisissez un code.');
+        return;
+      }
+      var button = ev.target.querySelector('button[type=submit]');
+      button.disabled = true;
+      message('setup-msg', '');
+      invoke('lock_configure', {
+        settings: {
+          enabled: enabled,
+          current_code: status.enabled ? $('current').value : null,
+          new_code: enabled && newCode ? newCode : null,
+          hello_enabled: enabled && $('hello-enabled').checked
+        }
+      })
+        .then(function () {
+          message('setup-msg', enabled ? 'Verrouillage activé.' : 'Verrouillage désactivé.', true);
+          setTimeout(closeWindow, 900);
+        })
+        .catch(function (e) {
+          message('setup-msg', errorText(e));
+          button.disabled = false;
+        });
+    });
+  }
+
+  function updateSetupFields() {
+    var on = $('enabled').checked;
+    ['new-code', 'confirm', 'hello-enabled'].forEach(function (id) { $(id).disabled = !on; });
+  }
+
+  invoke('lock_status').then(function (status) {
+    // Verrouillee entre-temps (veille...) : jamais de reglages sans deverrouillage.
+    if (mode === 'setup' && !status.locked) startSetup(status);
+    else startUnlock(status);
+  });
+})();
+</script>
+</body>
+</html>

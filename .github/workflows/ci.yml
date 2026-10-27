@@ -35,11 +35,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+
+      - name: Format
+        run: cargo fmt --check
 
       - name: Test
         run: cargo test --locked

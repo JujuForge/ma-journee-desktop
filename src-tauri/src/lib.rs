@@ -10,7 +10,6 @@ use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
 };
-use tauri_plugin_window_state::WindowExt;
 
 mod storage;
 use storage::LoadResult;
@@ -204,12 +203,15 @@ fn set_custom_notifications(
         log::warn!("Notifications personnalisees refusees : {}", e);
     })?;
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    // Verrou pris avant l'ecriture : deux appels rapproches ecriraient sinon le meme `.tmp` en
+    // parallele, et le disque pourrait finir different de la memoire.
+    let mut current = state.lock().unwrap();
     save_notifications_in(&dir, &notifications).inspect_err(|e| {
         log::error!("Echec sauvegarde des notifications personnalisees : {}", e);
     })?;
     // Compte uniquement : titre/message sont du contenu utilisateur, jamais journalises.
     log::info!("Notifications personnalisees sauvegardees ({} entree(s))", notifications.len());
-    *state.lock().unwrap() = notifications;
+    *current = notifications;
     Ok(())
 }
 
@@ -472,30 +474,74 @@ fn validate_notifications(list: &[CustomNotification]) -> Result<(), String> {
     Ok(())
 }
 
+/// Au-dela, une notification manquee (mise en veille...) n'est plus rattrapee : un rappel
+/// arrivant avec des heures de retard serait hors contexte.
+const CATCH_UP_WINDOW: time::Duration = time::Duration::minutes(60);
+
+fn truncate_to_minute(dt: time::PrimitiveDateTime) -> time::PrimitiveDateTime {
+    dt.replace_second(0).and_then(|d| d.replace_nanosecond(0)).unwrap_or(dt)
+}
+
+/// Minutes locales a evaluer depuis le passage precedent `prev` (exclu) jusqu'a `now` (inclus).
+/// `thread::sleep` etant fige pendant la mise en veille, l'ecart constate au reveil couvre les
+/// minutes manquees, limitees a `CATCH_UP_WINDOW`. Premier passage ou horloge reculee : `now` seul.
+fn minutes_to_check(
+    prev: Option<time::PrimitiveDateTime>,
+    now: time::PrimitiveDateTime,
+) -> Vec<time::PrimitiveDateTime> {
+    let now = truncate_to_minute(now);
+    let Some(prev) = prev.map(truncate_to_minute) else { return vec![now] };
+    if prev > now {
+        return vec![now];
+    }
+    let mut minute = (prev + time::Duration::MINUTE).max(now - CATCH_UP_WINDOW + time::Duration::MINUTE);
+    let mut minutes = Vec::new();
+    while minute <= now {
+        minutes.push(minute);
+        minute += time::Duration::MINUTE;
+    }
+    minutes
+}
+
+/// Notifications a envoyer pour `minutes`. `last_fired` retient, par id, la derniere minute
+/// (date comprise) de declenchement : une heure rejouee au passage a l'heure d'hiver ne
+/// redeclenche pas, mais le meme creneau la semaine suivante si.
+fn due_notifications<'a>(
+    list: &'a [CustomNotification],
+    minutes: &[time::PrimitiveDateTime],
+    last_fired: &mut HashMap<String, time::PrimitiveDateTime>,
+) -> Vec<&'a CustomNotification> {
+    let mut due = Vec::new();
+    for &minute in minutes {
+        let today = format!("{:04}-{:02}-{:02}", minute.year(), u8::from(minute.month()), minute.day());
+        let day = minute.weekday().number_from_monday() as u32;
+        for notif in list {
+            if should_fire_now(notif, &today, day, minute.hour() as u32, minute.minute() as u32)
+                && last_fired.get(&notif.id) != Some(&minute)
+            {
+                last_fired.insert(notif.id.clone(), minute);
+                due.push(notif);
+            }
+        }
+    }
+    // Purge les entrees dont l'id n'existe plus (notification supprimee entre-temps).
+    last_fired.retain(|id, _| list.iter().any(|n| &n.id == id));
+    due
+}
+
 fn start_notification_loop(notifications: SharedNotifications, app: tauri::AppHandle) {
     thread::spawn(move || {
-        let mut last_fired: HashMap<String, (u32, u32, u32)> = HashMap::new();
+        let mut last_fired = HashMap::new();
+        let mut prev = None;
         loop {
             thread::sleep(Duration::from_secs(30));
             let list = notifications.lock().unwrap().clone();
             let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-            let day = now.weekday().number_from_monday() as u32;
-            let hour = now.hour() as u32;
-            let minute = now.minute() as u32;
-            let today = format!("{:04}-{:02}-{:02}", now.year(), u8::from(now.month()), now.day());
-            let key = (day, hour, minute);
-
-            for notif in &list {
-                if !should_fire_now(notif, &today, day, hour, minute) {
-                    continue;
-                }
-                if last_fired.get(&notif.id) != Some(&key) {
-                    last_fired.insert(notif.id.clone(), key);
-                    send_notification(&app, &notif.label, &notif.message);
-                }
+            let now = time::PrimitiveDateTime::new(now.date(), now.time());
+            for notif in due_notifications(&list, &minutes_to_check(prev, now), &mut last_fired) {
+                send_notification(&app, &notif.label, &notif.message);
             }
-            // Purge les entrees dont l'id n'existe plus (notification supprimee entre-temps).
-            last_fired.retain(|id, _| list.iter().any(|n| &n.id == id));
+            prev = Some(now);
         }
     });
 }
@@ -572,6 +618,13 @@ fn open_log_folder(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 3600);
+const UPDATE_RETRY_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// Apres un echec (ex: reseau indisponible juste apres le demarrage), nouvel essai rapide
+/// plutot que d'attendre l'intervalle normal de 6 h.
+fn next_update_check_delay(succeeded: bool) -> Duration {
+    if succeeded { UPDATE_CHECK_INTERVAL } else { UPDATE_RETRY_INTERVAL }
+}
 
 async fn check_for_update(
     app: &tauri::AppHandle,
@@ -632,8 +685,8 @@ fn start_update_check_loop(
 ) {
     thread::spawn(move || {
         loop {
-            let _ = tauri::async_runtime::block_on(check_for_update(&app, &pending_update, &app_settings));
-            thread::sleep(UPDATE_CHECK_INTERVAL);
+            let result = tauri::async_runtime::block_on(check_for_update(&app, &pending_update, &app_settings));
+            thread::sleep(next_update_check_delay(result.is_ok()));
         }
     });
 }
@@ -689,7 +742,19 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--hidden"]),
         ))
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // Taille/position/etat maximise memorises, restaures automatiquement a la creation de la
+        // fenetre. VISIBLE est volontairement exclu : sinon le plugin reaffichait la fenetre au
+        // demarrage --hidden si l'app avait ete quittee fenetre ouverte (Ctrl+Q). La visibilite
+        // reste geree par --hidden et par le masquage dans le tray a la fermeture.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                )
+                .build(),
+        )
         .manage(notifications.clone())
         .manage(pending_update.clone())
         .manage(app_settings.clone())
@@ -778,8 +843,8 @@ pub fn run() {
             .menu(menu)
             .inner_size(1100.0, 750.0)
             .min_inner_size(380.0, 500.0)
-            // Cachee a la creation : evite un flash a la taille par defaut avant que
-            // restore_state() ne reapplique la taille/position memorisee ci-dessous.
+            // Cachee a la creation : evite un flash a la taille par defaut avant que le plugin
+            // window-state ne reapplique la taille/position memorisee.
             .visible(false)
             .initialization_script(r#"(function(){
                 function openExt(url){if(window.__TAURI__)window.__TAURI__.core.invoke('open_url',{url:String(url)});}
@@ -805,17 +870,6 @@ pub fn run() {
             })
             .build()?;
 
-            // Restaure la taille/position/etat maximise memorises lors de la derniere
-            // session. VISIBLE est volontairement exclu : la visibilite est deja geree
-            // par --hidden et par le masquage dans le tray a la fermeture (cf. plus bas),
-            // et laisser le plugin la restaurer entrerait en conflit avec cette logique.
-            if let Err(e) = win.restore_state(
-                tauri_plugin_window_state::StateFlags::SIZE
-                    | tauri_plugin_window_state::StateFlags::POSITION
-                    | tauri_plugin_window_state::StateFlags::MAXIMIZED,
-            ) {
-                log::warn!("Echec restauration de l'etat de la fenetre: {}", e);
-            }
             if !start_hidden {
                 let _ = win.show();
             }
@@ -1242,5 +1296,94 @@ mod tests {
         let e = validate_notifications(&[first, second]).unwrap_err();
         assert!(e.contains("notification 2"));
         assert!(!e.contains("Secret") && !e.contains("99:99"));
+    }
+
+    // ── minutes_to_check() ────────────────────────────────────────────────────
+
+    fn at(year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> time::PrimitiveDateTime {
+        time::Date::from_calendar_date(year, time::Month::try_from(month).unwrap(), day)
+            .unwrap()
+            .with_hms(hour, minute, second)
+            .unwrap()
+    }
+
+    #[test]
+    fn first_pass_checks_only_the_current_minute() {
+        assert_eq!(minutes_to_check(None, at(2026, 8, 24, 8, 0, 42)), vec![at(2026, 8, 24, 8, 0, 0)]);
+    }
+
+    #[test]
+    fn regular_30s_ticks_check_each_minute_once() {
+        let a = at(2026, 8, 24, 8, 0, 10);
+        let b = at(2026, 8, 24, 8, 0, 40);
+        let c = at(2026, 8, 24, 8, 1, 10);
+        assert!(minutes_to_check(Some(a), b).is_empty());
+        assert_eq!(minutes_to_check(Some(b), c), vec![at(2026, 8, 24, 8, 1, 0)]);
+    }
+
+    #[test]
+    fn wake_up_after_sleep_catches_up_missed_minutes() {
+        let minutes = minutes_to_check(Some(at(2026, 8, 24, 7, 59, 50)), at(2026, 8, 24, 8, 40, 5));
+        assert_eq!(minutes.len(), 41);
+        assert_eq!(minutes[0], at(2026, 8, 24, 8, 0, 0));
+        assert_eq!(*minutes.last().unwrap(), at(2026, 8, 24, 8, 40, 0));
+    }
+
+    #[test]
+    fn catch_up_is_limited_to_the_window() {
+        let minutes = minutes_to_check(Some(at(2026, 8, 24, 5, 0, 0)), at(2026, 8, 24, 8, 0, 0));
+        assert_eq!(minutes.len(), 60);
+        assert_eq!(minutes[0], at(2026, 8, 24, 7, 1, 0));
+    }
+
+    #[test]
+    fn clock_going_back_checks_only_the_current_minute() {
+        let minutes = minutes_to_check(Some(at(2026, 10, 25, 2, 59, 0)), at(2026, 10, 25, 2, 0, 20));
+        assert_eq!(minutes, vec![at(2026, 10, 25, 2, 0, 0)]);
+    }
+
+    #[test]
+    fn catch_up_crosses_midnight() {
+        let minutes = minutes_to_check(Some(at(2026, 8, 23, 23, 58, 0)), at(2026, 8, 24, 0, 1, 0));
+        assert_eq!(minutes, vec![at(2026, 8, 23, 23, 59, 0), at(2026, 8, 24, 0, 0, 0), at(2026, 8, 24, 0, 1, 0)]);
+    }
+
+    // ── due_notifications() ───────────────────────────────────────────────────
+
+    #[test]
+    fn single_day_notification_fires_again_the_following_week() {
+        let mut n = base_notif();
+        n.days = vec![1]; // lundi seulement
+        let list = [n];
+        let mut last_fired = HashMap::new();
+        let monday = [at(2026, 8, 24, 8, 0, 0)];
+        let next_monday = [at(2026, 8, 31, 8, 0, 0)];
+        assert_eq!(due_notifications(&list, &monday, &mut last_fired).len(), 1);
+        assert!(due_notifications(&list, &monday, &mut last_fired).is_empty());
+        assert_eq!(due_notifications(&list, &next_monday, &mut last_fired).len(), 1);
+    }
+
+    #[test]
+    fn missed_notification_is_sent_on_catch_up() {
+        let list = [base_notif()]; // 08:00 en semaine
+        let mut last_fired = HashMap::new();
+        let minutes = minutes_to_check(Some(at(2026, 8, 24, 7, 30, 0)), at(2026, 8, 24, 8, 20, 0));
+        assert_eq!(due_notifications(&list, &minutes, &mut last_fired).len(), 1);
+    }
+
+    #[test]
+    fn deleted_notifications_are_purged_from_last_fired() {
+        let mut last_fired = HashMap::from([("gone".to_string(), at(2026, 8, 24, 8, 0, 0))]);
+        due_notifications(&[base_notif()], &[], &mut last_fired);
+        assert!(last_fired.is_empty());
+    }
+
+    // ── next_update_check_delay() ─────────────────────────────────────────────
+
+    #[test]
+    fn update_check_retries_sooner_after_a_failure() {
+        assert_eq!(next_update_check_delay(true), UPDATE_CHECK_INTERVAL);
+        assert_eq!(next_update_check_delay(false), UPDATE_RETRY_INTERVAL);
+        assert!(UPDATE_RETRY_INTERVAL < UPDATE_CHECK_INTERVAL);
     }
 }

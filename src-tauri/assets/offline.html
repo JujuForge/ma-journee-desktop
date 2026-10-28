@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<!-- Page hors ligne de l'app bureau : servie par le protocole mjoffline (offline.rs) quand l'app web
+     ne s'est pas signalee chargee (commande frontend_ready) dans le delai imparti. Autonome (aucun acces aux
+     fichiers de majournee.com) ; {{FRONTEND_URL}} est remplace par l'adresse de l'app. -->
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hors ligne · Ma Journée</title>
+    <style>
+        :root {
+            --bg: #F5F5F7; --text: #111111; --text-secondary: #6B6B6B;
+            --primary: #cb4f00; --shadow: 0 4px 16px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.06);
+            color-scheme: light dark;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root { --bg: #18191a; --text: #e4e6eb; --text-secondary: #b0b3b8; --shadow: 0 4px 16px rgba(0,0,0,0.4); }
+        }
+        * { box-sizing: border-box; margin: 0; }
+        body {
+            background: var(--bg); color: var(--text);
+            font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        }
+        main {
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            gap: 12px; min-height: 100vh; max-width: 400px; margin: 0 auto; padding: 32px 24px; text-align: center;
+        }
+        img { border-radius: 24px; box-shadow: var(--shadow); margin-bottom: 8px; }
+        h1 { font-size: 1.875rem; font-weight: 700; letter-spacing: -0.5px; }
+        p { font-size: 1.0625rem; line-height: 1.5; color: var(--text-secondary); }
+        button {
+            width: 100%; margin-top: 12px; padding: 14px 20px; border: 0; border-radius: 10px;
+            background: var(--primary); color: #fff; font: inherit; font-size: 1.0625rem; font-weight: 600; cursor: pointer;
+        }
+        button:hover { opacity: 0.88; }
+    </style>
+</head>
+<body>
+<main>
+    <img src="logo.png" alt="Ma Journée" width="96" height="96">
+    <h1>Vous êtes hors ligne</h1>
+    <p>Ma Journée n'a pas pu être chargée. Vérifiez votre connexion internet.</p>
+    <button id="retry" type="button">Réessayer</button>
+</main>
+<script>
+    function retry() { window.location.href = '{{FRONTEND_URL}}'; }
+    document.getElementById('retry').addEventListener('click', retry);
+    window.addEventListener('online', retry);
+</script>
+</body>
+</html>

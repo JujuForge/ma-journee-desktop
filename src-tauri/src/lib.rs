@@ -15,6 +15,7 @@ use tauri::{
 };
 
 mod lock;
+mod offline;
 mod storage;
 use storage::LoadResult;
 
@@ -254,7 +255,7 @@ fn is_allowed_url_scheme(url: &str) -> bool {
 }
 
 enum NavigationAction {
-    /// Page du site de l'app : navigation normale dans la fenetre.
+    /// Page du site de l'app ou page hors ligne locale : navigation normale dans la fenetre.
     Stay,
     /// Autre site http(s) ou mailto : ouvert dans l'application par defaut du systeme.
     OpenExternally,
@@ -263,7 +264,7 @@ enum NavigationAction {
 }
 
 fn navigation_action(url: &tauri::Url, frontend_host: &str) -> NavigationAction {
-    if url.host_str() == Some(frontend_host) {
+    if url.host_str() == Some(frontend_host) || offline::is_offline_page(url) {
         NavigationAction::Stay
     } else if is_allowed_url_scheme(url.as_str()) {
         NavigationAction::OpenExternally
@@ -882,6 +883,8 @@ pub fn run() {
         )
         // Page locale de l'ecran de verrouillage (fonctionne hors ligne, voir lock.rs)
         .register_uri_scheme_protocol(lock::PROTOCOL, |_ctx, request| lock::serve_asset(&request))
+        // Page hors ligne de la fenetre principale (premier lancement sans reseau, voir offline.rs)
+        .register_uri_scheme_protocol(offline::PROTOCOL, |_ctx, request| offline::serve_asset(&request, FRONTEND.1))
         .manage(notifications.clone())
         .manage(pending_update.clone())
         .manage(app_settings.clone())
@@ -986,6 +989,9 @@ pub fn run() {
                 },true);
             })();"#)
             .initialization_script(format!("document.addEventListener('DOMContentLoaded',function(){{{REPORT_APPEARANCE_JS}}});"))
+            .on_page_load(move |window, payload| {
+                offline::on_page_load(window, payload.url(), payload.event(), frontend_url);
+            })
             .on_navigation(move |url| match navigation_action(url, frontend_host) {
                 NavigationAction::Stay => true,
                 NavigationAction::OpenExternally => {
@@ -1100,7 +1106,7 @@ pub fn run() {
             get_pending_update, check_for_update_now, install_update, get_platform, get_app_version,
             get_autostart, set_autostart, open_url,
             get_update_notif_enabled, set_update_notif_enabled, set_appearance,
-            notify, open_log_folder, update_tray_status,
+            notify, open_log_folder, update_tray_status, offline::frontend_ready,
             lock::lock_status, lock::lock_unlock_with_code, lock::lock_unlock_with_hello,
             lock::lock_configure, lock::lock_reset, lock::open_lock_settings
         ])
@@ -1154,6 +1160,11 @@ mod tests {
     #[test]
     fn stays_in_the_window_on_the_app_host() {
         assert!(matches!(action_for("https://majournee.com/taches?x=1"), NavigationAction::Stay));
+    }
+
+    #[test]
+    fn stays_in_the_window_on_the_offline_page() {
+        assert!(matches!(action_for(&offline::page_base()), NavigationAction::Stay));
     }
 
     #[test]

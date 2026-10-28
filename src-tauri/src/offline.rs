@@ -41,7 +41,9 @@ pub fn serve_asset(request: &http::Request<Vec<u8>>, frontend_url: &str) -> http
         "/" => http::Response::builder()
             .header(http::header::CONTENT_TYPE, "text/html; charset=utf-8")
             .body(Cow::Owned(PAGE.replace("{{FRONTEND_URL}}", frontend_url).into_bytes())),
-        "/logo.png" => http::Response::builder().header(http::header::CONTENT_TYPE, "image/png").body(Cow::Borrowed(LOGO)),
+        "/logo.png" => {
+            http::Response::builder().header(http::header::CONTENT_TYPE, "image/png").body(Cow::Borrowed(LOGO))
+        }
         _ => http::Response::builder().status(http::StatusCode::NOT_FOUND).body(Cow::Borrowed(&[][..])),
     };
     response.expect("en-tetes statiques valides")
@@ -103,7 +105,8 @@ mod tests {
 
     #[test]
     fn page_is_served_with_frontend_url_and_unknown_paths_are_not_found() {
-        let get = |path: &str| serve_asset(&http::Request::get(path).body(Vec::new()).unwrap(), "https://majournee.com");
+        let get =
+            |path: &str| serve_asset(&http::Request::get(path).body(Vec::new()).unwrap(), "https://majournee.com");
         let page = get("/");
         assert_eq!(page.status(), http::StatusCode::OK);
         let html = String::from_utf8(page.body().to_vec()).unwrap();

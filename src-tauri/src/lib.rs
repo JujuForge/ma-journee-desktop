@@ -989,6 +989,7 @@ pub fn run() {
                 },true);
             })();"#)
             .initialization_script(format!("document.addEventListener('DOMContentLoaded',function(){{{REPORT_APPEARANCE_JS}}});"))
+            .initialization_script(offline::READY_SCRIPT)
             .on_page_load(move |window, payload| {
                 offline::on_page_load(window, payload.url(), payload.event(), frontend_url);
             })

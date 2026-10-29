@@ -93,6 +93,13 @@ pub fn on_page_load(window: tauri::WebviewWindow, url: &tauri::Url, event: PageL
     });
 }
 
+/// Signal injecte par le bureau lui-meme a la fin du parsing de la page : il ne depend pas de la
+/// version du JS de l'app web. Un Service Worker encore sur l'ancienne version (mise a jour du
+/// bureau avant celle de l'app web) servirait sinon un main.js sans appel a `frontend_ready`, et la
+/// page hors ligne reviendrait a chaque chargement. Le test sur `#screen-home` evite de signaler
+/// la page d'erreur du moteur web, qui peut partager l'adresse de l'app.
+pub const READY_SCRIPT: &str = "document.addEventListener('DOMContentLoaded',function(){try{if(document.getElementById('screen-home')&&window.__TAURI__){window.__TAURI__.core.invoke('frontend_ready').catch(function(){});}}catch(e){}});";
+
 /// Appelee par l'app web une fois chargee (js/main.js).
 #[tauri::command]
 pub fn frontend_ready() {
